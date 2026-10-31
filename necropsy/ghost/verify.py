@@ -11,6 +11,7 @@
 
 import json
 import logging
+import os
 import sqlite3
 from typing import List, Dict, Any, Set
 
@@ -54,7 +55,7 @@ def verify_claims(
     cutoff = as_of if as_of.endswith("Z") else f"{as_of}Z"
 
     conn = sqlite3.connect(
-        str(__import__("pathlib").Path(__import__("os").getcwd__()) / "data/necropsy.db")
+        str(__import__("pathlib").Path(os.getcwd()) / "data/necropsy.db")
     )
     conn.execute("PRAGMA foreign_keys = ON;")
     try:

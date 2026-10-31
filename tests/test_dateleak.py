@@ -20,7 +20,7 @@ necropsy_dir = os.path.join(os.path.dirname(__file__), "..", "necropsy")
 if necropsy_dir not in sys.path:
     sys.path.insert(0, necropsy_dir)
 
-from necropsy.db import init_db, add_repo
+from necropsy.db import init_db, add_repo, add_commits
 from necropsy.ingest.git import extract_commits
 from necropsy.index.retrieve import retrieve
 

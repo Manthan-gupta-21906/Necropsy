@@ -341,8 +341,8 @@ def add_repo(
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         
         conn.execute("""
-            INSERT INTO repos (name, source, local_path, status, ingested_at, last_commit_at, first_commit_at, commit_count)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO repos (name, source, local_path, status, ingested_at, last_commit_at, first_commit_at, commit_count, head_sha)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             name,
             source.strip(),
@@ -351,7 +351,8 @@ def add_repo(
             now,
             now,
             now,
-            0
+            0,
+            hashlib.sha256(source.strip().encode()).hexdigest()[:8]
         ))
         
         repo_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
