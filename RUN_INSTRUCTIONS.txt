@@ -1,0 +1,84 @@
+Necropsy - Run Instructions
+==========================
+
+== QUICK START ==
+
+1. Install dependencies (one-time):
+   pip install fastapi uvicorn pyDriller sentence-transformers
+
+2. Pull the local LLM model (one-time, needs network):
+   ollama pull qwen3:8b
+
+3. Start the server:
+   set PYTHONPATH=D:\Manthan - study\HackOctober\week1\Necropsy
+   python -m uvicorn api.server:app --host 127.0.0.1 --port 8000
+
+4. Open http://127.0.0.1:8000 in your browser
+
+== USAGE ==
+
+The app has three main sections:
+
+A. EXHUME - Index a repository
+   - Enter a Git repo URL (https://github.com/...) or local path containing .git
+   - Click "Index Repository"
+   - Wait for progress bar to complete
+   - The app will automatically show autopsy stats
+
+B. AUTOPSY - View analytics
+   - Displays: time of death, last gasp commit, weekly activity, bus factor, eras
+   - Updated automatically after exhume
+
+C. SÉANCE - Ask the ghost
+   - Use the time slider to select a date (as_of)
+   - Type a question about the repository
+   - Click "Question the Ghost"
+   - View the answer with verified citations
+   - Each claim cites a real commit hash
+
+C. GRAVEYARD - View tombstones
+   - Shows deleted files and functions with their epitaphs (deleting commit messages)
+
+== KEY FEATURES ==
+
+- Time slider: drag to any date; everything rewinds (stats + answers + graveyard)
+- Machine Status panel (top): shows model name, Ollama reachability, embeddings loaded, last answer latency
+- "The dead do not remember that.": appears when no claims survive verification
+- All citations are verified in code: hash exists, dated ≤ as_of, in evidence set, supports the claim
+- Works offline after initial clone + model download
+
+== OFFLINE MODE ==
+
+After initial setup, the app works without network:
+
+1. Clone a repo: git clone <url> (one-time, needs network)
+2. Pull models: ollama pull qwen3:8b (one-time, needs network)
+3. Run: python -m uvicorn api.server:app --host 127.0.0.1 --port 8000
+4. Disconnect network - the app functions fully offline
+
+Data stays in: data/necropsy.db (local SQLite)
+Server binds to: 127.0.0.1 only
+
+== FILES CREATED ==
+
+Critical files (all present):
+- necropsy/config.py       Model pins, env-var overrides
+- necropsy/db.py           SQLite operations, date-leak-safe queries
+- necropsy/api/server.py   FastAPI endpoints (/health, /exhume, /autopsy, /seance)
+- necropsy/ghost/verify.py Code-level citation verification
+- necropsy/index/retrieve.py Binary-search prefix slice retrieval
+- web/index.html           Full séance UI
+- web/style.css            Ink/parchment/ember design, accessibility
+- web/app.js               API client, time slider, Machine Status panel
+- web/vendor/d3/d3.min.js  Vendored D3
+- docs/PRIVACY.md          Privacy guarantees
+- docs/OFFLINE.md          Offline operation guide
+
+== MANDATORY DATE-LEAK TEST ==
+
+The test verifies that retrieval, stats, and ghost answers respect the as_of boundary:
+- as_of=2024-02-01 → only commit A (Jan 15) appears
+- as_of=2024-02-15 → commits A+B retrieved, C (Mar 20) excluded
+- as_of=2024-03-31 → all 3 commits retrieved
+
+Run: python -m pytest tests/test_dateleak.py -v
