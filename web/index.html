@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="necropsy">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Necropsy — Séance with the Ghost</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Machine Status Panel -->
+        <div id="machine-status" class="panel" aria-live="polite">
+            <div class="panel-header">
+                <span class="panel-title">MACHINE STATUS</span>
+            </div>
+            <div class="panel-body">
+                <div id="status-model" class="status-item">Model: loading...</div>
+                <div id="status-ollama" class="status-item">Ollama: checking...</div>
+                <div id="status-embeddings" class="status-item">Embeddings: loading...</div>
+                <div id="status-latency" class="status-item">Last answer: —</div>
+            </div>
+        </div>
+
+        <!-- Main content -->
+        <main id="main-content" class="main">
+
+            <!-- Exhume Section -->
+            <section id="exhume-section" class="panel" hidden>
+                <div class="panel-header">
+                    <span class="panel-title">Exhume</span>
+                </div>
+                <div class="panel-body">
+                    <div class="form-group">
+                        <label for="repo-source" class="sr-only">Repository source</label>
+                        <input type="text" id="repo-source" class="input-field"
+                            placeholder="https://github.com/user/repo or local path">
+                    </div>
+                    <button id="btn-exhume" class="btn-primary">Index Repository</button>
+                    <div id="exhume-progress" class="progress hidden">
+                        <div class="progress-bar" style="width: 0%"></div>
+                    </div>
+                    <div id="exhume-message" class="message"></div>
+                </div>
+            </section>
+
+            <!-- Autopsy Section -->
+            <section id="autopsy-section" class="panel" hidden>
+                <div class="panel-header">
+                    <span class="panel-title">Autopsy</span>
+                </div>
+                <div class="panel-body">
+                    <div class="stats-grid" id="stats-grid">
+                        <!-- Stats populated by API -->
+                    </div>
+                </div>
+            </section>
+
+            <!-- Séance Section -->
+            <section id="seance-section" class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Séance</span>
+                </div>
+                <div class="panel-body">
+                    <div class="slider-wrapper">
+                        <label for="date-slider" class="sr-only">Time boundary date</label>
+                        <input type="range" id="date-slider" class="time-slider"
+                            min="1900" max="2026" value="2026"
+                            step="1" aria-valuetext="2026">
+                        <output id="date-display" class="date-display" for="date-slider">2026</output>
+                    </div>
+                    <div class="form-group">
+                        <textarea id="question-input" class="input-field" rows="3"
+                            placeholder="Ask the ghost a question about the repository..."></textarea>
+                    </div>
+                    <button id="btn-seance" class="btn-primary">Question the Ghost</button>
+                    <div id="seance-result" class="seance-result hidden">
+                        <div class="answer" id="answer-text">...</div>
+                        <div class="claims" id="claims-list"></div>
+                    </div>
+                    <div id="no-answer" class="no-answer hidden">
+                        <p>"The dead do not remember that."</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Graveyard Section -->
+            <section id="graveyard-section" class="panel" hidden>
+                <div class="panel-header">
+                    <span class="panel-title">Graveyard</span>
+                </div>
+                <div class="panel-body">
+                    <div id="tombstones-list" class="tombstones-list">
+                        <!-- Tombstones populated by API -->
+                    </div>
+                </div>
+            </section>
+
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

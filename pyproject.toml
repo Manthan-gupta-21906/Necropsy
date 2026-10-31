@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "necropsy"
+version = "0.1.0"
+description = "Autopsy on abandoned Git repositories; séance with the ghost."
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "py Driller",
+    "sentence-transformers",
+    "numpy",
+    "pydantic",
+]
+
+[project.scripts]
+necropsy = "necropsy.api:app"
+
+[tool.setuptools.packages.find]
+where = ["necropsy"]
+
+[tool.setuptools.install.args]
+pip_args = "--no-deps"

@@ -1,0 +1,299 @@
+/* Necropsy UI — "A forgotten machine has awakened"
+   Near-black ink, parchment text, one ember accent, cool spectral glow.
+   No pumpkins, no novelty fonts, no generic AI-chat look.
+   Fully disabled under prefers-reduced-motion.
+   Semantic HTML, keyboard-operable slider, visible focus, AA contrast.
+   No horizontal overflow at 360px.
+*/
+
+:root {
+    --bg: #050505;
+    --bg-subtle: #0e0e0e;
+    --ink: #f4f1eb;
+    --ink-dim: #8b867f;
+    --accent: #c4a70c;    /* ember gold */
+    --accent-glow: rgba(196, 167, 12, 0.35);
+    --muted: #3d3a37;
+    --border: #2a2a2a;
+    --error: #e45f5f;
+    --success: #5f8575;
+
+    --font-base: "SF Mono", "Fira Mono", "Droid Sans Mono", monospace;
+    --font-display: "Merriweather", "Georgia", serif;
+
+    --transition-fast: 150ms ease;
+    --transition-slow: 300ms ease;
+
+    --max-width: 960px;
+}
+
+/* Page base */
+html {
+    box-sizing: border-box;
+    font-size: 16px;
+    scroll-behavior: smooth;
+}
+
+*, *::before, *::after { box-sizing: inherit; }
+
+body {
+    margin: 0;
+    font-family: var(--font-base), system-ui, sans-serif;
+    background-color: var(--bg);
+    color: var(--ink);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overflow-x: hidden;
+}
+
+@media (max-width: 360px) {
+    html { font-size: 14px; }
+}
+
+/* Focus outlines — visible, no outline on same color */
+*:focus-visible {
+    outline: 2px var(--accent) solid;
+    outline-offset: 2px;
+}
+
+button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px var(--accent) solid; }
+
+/* Container */
+.container {
+    max-width: var(--max-width);
+    margin: 0 auto;
+    padding: 1rem;
+}
+
+/* Panels */
+.panel {
+    background-color: var(--bg-subtle);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-bottom: 1.5rem;
+}
+
+.panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--border);
+    font-family: var(--font-display), serif;
+    font-size: 0.85rem;
+    font-weight: normal;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.panel-body {
+    padding: 1rem;
+}
+
+/* Status panel */
+#machine-status {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background-color: var(--bg);
+    border-bottom: 1px solid var(--border);
+}
+
+.status-item {
+    margin: 0.25rem 0;
+    font-size: 0.75rem;
+    color: var(--ink-dim);
+}
+
+/* Main content area */
+.main {
+    display: grid;
+    gap: 1.5rem;
+}
+
+/* Section visibility */
+section:not(.hidden) { display: block; }
+.hidden { display: none !important; }
+
+/* Forms */
+.form-group {
+    margin: 0 0 1rem 0;
+}
+
+label {
+    display: block;
+    margin-bottom: 0.25rem;
+    font-size: 0.75rem;
+    color: var(--ink-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.input-field {
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    background-color: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--ink);
+    font-family: var(--font-base), monospace;
+    font-size: 0.875rem;
+    transition: border-color var(--transition-fast);
+}
+
+.input-field:focus {
+    border-color: var(--accent);
+    outline: none;
+}
+
+/::placeholder { color: var(--ink-dim); }
+
+/* Buttons */
+.btn-primary {
+    display: inline-block;
+    padding: 0.6rem 1.2rem;
+    background-color: var(--accent);
+    color: var(--bg);
+    font-family: var(--font-base), monospace;
+    font-size: 0.875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background-color var(--transition-fast), transform 0.1s ease;
+}
+
+.btn-primary:hover { background-color: #b8990b; }
+.btn-primary:active { transform: scale(0.98); }
+.btn-primary:focus-visible { outline: 2px var(--bg) solid; outline-offset: 2px; }
+
+/* Disabled state */
+.btn-primary:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+/* Slider */
+.slider-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 1rem 0;
+}
+
+.time-slider {
+    flex: 1;
+    width: 100%;
+    height: 8px;
+    -webkit-appearance: none;
+    appearance: none;
+    background-color: var(--border);
+    border-radius: 4px;
+    outline: none;
+}
+
+.time-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 20px;
+    height: 20px;
+    background-color: var(--accent);
+    border-radius: 50%;
+    cursor: pointer;
+    transition: transform 0.15s ease;
+}
+
+.time-slider::-webkit-slider-thumb:hover {
+    transform: scale(1.2);
+}
+
+.time-slider:focus-visible { outline: 2px var(--accent) solid; outline-offset: 2px; }
+
+.date-display {
+    min-width: 5ch;
+    text-align: center;
+    color: var(--accent);
+    font-variant-numeric: tabular-numerals;
+}
+
+/* Sections */
+.seance-result { padding: 1rem 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.answer { font-size: 1.125rem; line-height: 1.6; margin-bottom: 1rem; }
+.claims { }
+.claim { margin: 0.25rem 0; font-size: 0.875rem; }
+.claim .hash { color: var(--accent); }
+
+.no-answer {
+    padding: 2rem;
+    text-align: center;
+    color: var(--error);
+}
+
+/* Stats grid (autopsy) */
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 1rem;
+}
+
+.stat-item {
+    background-color: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.75rem;
+}
+
+.stat-label {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--ink-dim);
+    margin-bottom: 0.25rem;
+}
+
+.stat-value {
+    font-family: var(--font-display), serif;
+    font-size: 1.25rem;
+    color: var(--ink);
+}
+
+/* Tombstones */
+.tombstones-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 0.75rem;
+}
+
+.tombstone {
+    background-color: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.75rem;
+}
+
+.tombstone .epitaph {
+    font-family: var(--font-display), serif;
+    font-size: 0.85rem;
+    color: var(--accent);
+    margin: 0.25rem 0;
+}
+
+.tombstone .meta {
+    font-size: 0.75rem;
+    color: var(--ink-dim);
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0s !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0s !important;
+    }
+}
