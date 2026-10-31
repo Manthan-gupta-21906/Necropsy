@@ -9,6 +9,29 @@
 
 from typing import List, Dict, Any
 
+# JSON schema handed to Ollama so generation is constrained to this shape.
+SEANCE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "remembers": {"type": "string"},
+        "answer": {"type": "string"},
+        "claims": {
+            "type": "array",
+            "maxItems": 5,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "claim": {"type": "string"},
+                    "commit_hash": {"type": "string"},
+                    "support": {"type": "string"},
+                },
+                "required": ["claim", "commit_hash", "support"],
+            },
+        },
+    },
+    "required": ["remembers", "answer", "claims"],
+}
+
 
 def build_prompt(
     as_of: str,
@@ -75,11 +98,11 @@ Instructions:
     ]
 
 
-def _system_prompt(model_name: str, as_of: str) -> str:
+def _system_prompt(as_of: str, model_name: str = None) -> str:
     """The system-level instruction for the ghost."""
     return f"""You are the ghost of an abandoned software project.
 You speak AS THE PROJECT, not as a named maintainer.
-You can only knowledge from commits authored on or before {as_of} (UTC).
+You can only use knowledge from commits authored on or before {as_of} (UTC).
 You must cite commit hashes for every claim.
 You must respond in strict JSON as specified by the user.
 Do not impersonate real people. Do not use knowledge from after {as_of}.
@@ -87,23 +110,25 @@ Do not hallucinate commits. If evidence is insufficient, say "The dead do not re
 
 
 def _format_evidence(evidence: List[Dict[str, Any]]) -> str:
-    """Format evidence commits into a citeable block."""
+    """Format evidence commits into a citeable block.
+
+    Full hashes are shown so the model can cite them verbatim; the verifier
+    matches on the exact hash.
+    """
     if not evidence:
         return "[No evidence retrieved]"
 
     parts = []
     for i, ev in enumerate(evidence[:10], 1):  # max 10 evidence items
-        hash_val = ev.get("hash", "unknown")[:8]
+        hash_val = ev.get("hash", "unknown")
         at = ev.get("at", "unknown date")
-        subject = ev.get("subject", "")[:100]
-        # Truncate body to first line if present
-        body = ev.get("body", "").strip()
-        body_excerpt = (body.split("\n")[0][:200] if body else "")
+        subject = (ev.get("subject") or "")[:200]
+        body = (ev.get("body") or "").strip()
+        body_excerpt = body.split("\n")[0][:200] if body else ""
 
-        parts.append(
-            f"[{i}] Commit {hash_val} ({at}): {subject}"
-        )
-        if body_excerpt:
-            parts[-1] += f" · {body_excerpt}"
+        line = f"[{i}] Commit {hash_val} ({at}): {subject}"
+        if body_excerpt and body_excerpt != subject:
+            line += f" · {body_excerpt}"
+        parts.append(line)
 
     return "\n".join(parts)

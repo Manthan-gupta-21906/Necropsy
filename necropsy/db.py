@@ -14,19 +14,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
-DATA_DIR = Path("data")
-DB_PATH = DATA_DIR / "necropsy.db"
+from . import config
+
+
+def _db_path() -> Path:
+    """Resolve the DB path at call time (honours NECROPSY_DB_PATH)."""
+    return Path(config.db_path())
 
 
 def _ensure_data_dir():
     """Ensure the data directory exists."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _db_path().parent.mkdir(parents=True, exist_ok=True)
 
 
 def get_connection() -> sqlite3.Connection:
     """Get a connected SQLite instance with enforced FK and correct pragmas."""
     _ensure_data_dir()
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(_db_path()))
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.execute("PRAGMA journal_mode = WAL;")
     conn.execute("PRAGMA synchronous = NORMAL;")
@@ -308,9 +312,9 @@ def _create_eval_results_table(conn: sqlite3.Connection) -> None:
 def _update_schema_version(conn: sqlite3.Connection, version: int) -> None:
     conn.execute("""
         INSERT INTO meta (key, value)
-        VALUES (?, ?)
+        VALUES ('schema_version', ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    """, (str(version), 'migrated'))
+    """, (str(version),))
 
 
 def repo_exists(source: str) -> bool:
@@ -384,22 +388,131 @@ def get_repo(repo_id: int) -> Optional[dict]:
     """Get repo data by id."""
     conn = get_connection()
     try:
-        row = conn.execute("SELECT * FROM repos WHERE id = ?", (repo_id,)).fetchone()
+        cur = conn.execute("SELECT * FROM repos WHERE id = ?", (repo_id,))
+        row = cur.fetchone()
         if not row:
             return None
-        cols = [desc[0] for desc in conn.description]
+        cols = [desc[0] for desc in cur.description]
         return dict(zip(cols, row))
     finally:
         conn.close()
 
 
-def list_repos() -> List[dict]:
-    """List all repos."""
+def get_repo_by_source(source: str) -> Optional[dict]:
+    """Get repo data by its (unique) source."""
     conn = get_connection()
     try:
-        rows = conn.execute("SELECT id, name, source, status, commit_count, ingested_at FROM repos").fetchall()
-        cols = [desc[0] for desc in conn.description]
-        return [dict(zip(cols, row)) for row in rows]
+        cur = conn.execute("SELECT * FROM repos WHERE source = ?", (source.strip(),))
+        row = cur.fetchone()
+        if not row:
+            return None
+        cols = [desc[0] for desc in cur.description]
+        return dict(zip(cols, row))
+    finally:
+        conn.close()
+
+
+def reset_repo(repo_id: int) -> None:
+    """Delete all ingested data for a repo so it can be re-indexed in place."""
+    conn = get_connection()
+    try:
+        conn.execute("DELETE FROM embeddings WHERE repo_id = ?", (repo_id,))
+        conn.execute("DELETE FROM tombstones WHERE repo_id = ?", (repo_id,))
+        conn.execute("DELETE FROM symbols WHERE repo_id = ?", (repo_id,))
+        conn.execute("DELETE FROM era_points WHERE repo_id = ?", (repo_id,))
+        conn.execute("DELETE FROM eras WHERE repo_id = ?", (repo_id,))
+        conn.execute("DELETE FROM commits WHERE repo_id = ?", (repo_id,))
+        conn.execute("DELETE FROM authors WHERE repo_id = ?", (repo_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def finalize_repo(
+    repo_id: int,
+    head_sha: str,
+    first_commit_at: str,
+    last_commit_at: str,
+    commit_count: int,
+    local_path: str,
+    status: str = "ready",
+) -> None:
+    """Write the final, real metadata for a repo after indexing."""
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            UPDATE repos
+               SET head_sha = ?, first_commit_at = ?, last_commit_at = ?,
+                   commit_count = ?, local_path = ?, status = ?, progress = 1.0,
+                   error = NULL
+             WHERE id = ?
+            """,
+            (
+                head_sha,
+                first_commit_at,
+                last_commit_at,
+                commit_count,
+                local_path,
+                status,
+                repo_id,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def repo_range(repo_id: int) -> dict:
+    """Return the real commit-date bounds for a repo (for the time slider)."""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT MIN(authored_at), MAX(authored_at), COUNT(*) "
+            "FROM commits WHERE repo_id = ?",
+            (repo_id,),
+        ).fetchone()
+        return {
+            "repo_id": repo_id,
+            "first_commit_at": row[0] if row else None,
+            "last_commit_at": row[1] if row else None,
+            "commit_count": row[2] if row else 0,
+        }
+    finally:
+        conn.close()
+
+
+def get_commits_by_hashes(repo_id: int, hashes: List[str]) -> Dict[str, dict]:
+    """Return commit text/date for the given hashes, keyed by hash."""
+    if not hashes:
+        return {}
+    conn = get_connection()
+    try:
+        placeholders = ",".join("?" for _ in hashes)
+        rows = conn.execute(
+            f"SELECT hash, subject, body, authored_at FROM commits "
+            f"WHERE repo_id = ? AND hash IN ({placeholders})",
+            (repo_id, *hashes),
+        ).fetchall()
+        return {
+            r[0]: {"subject": r[1], "body": r[2], "at": r[3]}
+            for r in rows
+        }
+    finally:
+        conn.close()
+
+
+def list_repos() -> List[dict]:
+    """List all repos with the date bounds the time slider needs."""
+    conn = get_connection()
+    try:
+        cur = conn.execute(
+            "SELECT id, name, source, status, commit_count, ingested_at, "
+            "       first_commit_at, last_commit_at, progress, error "
+            "FROM repos ORDER BY id"
+        )
+        cols = [desc[0] for desc in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
     finally:
         conn.close()
 
@@ -590,7 +703,7 @@ def get_embeddings_by_date(
     """Retrieve embeddings dated <= as_of_end, sorted by item_at."""
     import numpy as np
     if conn is None:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(str(_db_path()))
         close = True
     else:
         close = False
@@ -656,7 +769,7 @@ def retrieve(
         model_name = EMBED_MODEL
     
     if conn is None:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(str(_db_path()))
         close = True
     else:
         close = False

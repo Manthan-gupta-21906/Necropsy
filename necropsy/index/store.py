@@ -11,12 +11,17 @@
 
 import json
 import sqlite3
+import hashlib
 import numpy as np
 from pathlib import Path
 from typing import List, Tuple, Optional, Any
 
-DATA_DIR = Path("data")
-DB_PATH = Path("data/necropsy.db")
+from .. import config
+
+
+def _db_path() -> Path:
+    """Resolve the DB path at call time (honours NECROPSY_DB_PATH)."""
+    return Path(config.db_path())
 
 
 def _ensure_conn(conn: sqlite3.Connection) -> sqlite3.Connection:
@@ -45,7 +50,7 @@ def store_embeddings(
         Number of embeddings stored.
     """
     if conn is None:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(str(_db_path()))
         close = True
     else:
         close = False
@@ -88,7 +93,7 @@ def store_embeddings(
             item_at = item.get("item_at", "")
 
             conn.execute("""
-                INSERT OR IGNORE INTO embeddings
+                INSERT OR REPLACE INTO embeddings
                 (repo_id, item_type, item_ref, item_at, text_hash, model, dim, vector)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
@@ -127,7 +132,7 @@ def get_embeddings_by_date(
         corresponding references and dates.
     """
     if conn is None:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(str(_db_path()))
         close = True
     else:
         close = False
@@ -165,94 +170,14 @@ def get_embeddings_by_date(
             else:
                 hi = mid
 
-        # Items [0:lo] survive the date filter
+        # Items [0:lo] survive the date filter. Slice every list so indices
+        # stay aligned and no post-as_of date can be read downstream.
         surviving_refs = item_refs[:lo]
         surviving_vecs = vectors[:lo]
+        surviving_ats = item_ats[:lo]
 
-        return surviving_refs, surviving_vecs, item_ats
+        return surviving_refs, surviving_vecs, surviving_ats
     finally:
         if close:
             conn.close()
 
-
-def retrieve(
-    repo_id: int,
-    query: str,
-    as_of: str,
-    model_name: str = None,
-    conn: sqlite3.Connection = None,
-) -> List[dict]:
-    """Retrieve top-k relevant commits dated <= as_of for a query.
-
-    Pipeline:
-        1. Encode query text
-        2. Get date-filtered embeddings (prefix slice by binary search)
-        3. Compute cosine similarities (brute-force dot product)
-        4. Return top-k with refs, dates, similarities
-
-    Args:
-        repo_id: repo database id
-        query: user question text
-        as_of: date string (end-of-day UTC)
-        k: number of results to return
-        model_name: embedding model; defaults to config EMBED_MODEL
-        conn: optional existing sqlite3.Connection
-
-    Returns:
-        List of dicts: {hash, ref, at, similarity}
-        sorted by similarity descending, all dated <= as_of.
-    """
-    import numpy as np
-    from .embed import embed_text, compute_embeddings
-
-    if model_name is None:
-        from .config import EMBED_MODEL
-        model_name = EMBED_MODEL
-
-    if conn is None:
-        conn = sqlite3.connect(str(DB_PATH))
-        close = True
-    else:
-        close = False
-
-    try:
-        _ensure_conn(conn)
-
-        # Step 1: encode query
-        query_vec = np.array(embed_text(query, model_name), dtype=np.float32)
-        query_vec = query_vec / np.linalg.norm(query_vec) if np.linalg.norm(query_vec) > 0 else query_vec
-
-        # Step 2: get date-filtered embeddings
-        surviving_refs, surviving_vecs, all_ats = get_embeddings_by_date(
-            repo_id, model_name, as_of, conn
-        )
-
-        if len(surviving_vecs) == 0:
-            return []
-
-        # Step 3: brute-force cosine similarity via dot product
-        # Both query_vec and surviving_vecs are L2-normalized
-        sims = surviving_vecs @ query_vec  # shape (n,)
-
-        # Get top-k indices
-        n = len(surviving_vecs)
-        k = min(k, n)
-        top_indices = np.argsort(-sims)[:k]  # descending
-
-        # Step 4: build result list
-        results = []
-        for idx in top_indices:
-            hash_val = surviving_refs[idx]  # item_ref is the commit hash
-            at = all_ats[idx] if idx < len(all_ats) else ""
-            similarity = float(sims[idx])
-            results.append({
-                "hash": hash_val,
-                "ref": hash_val,
-                "at": at,
-                "similarity": similarity,
-            })
-
-        return results
-    finally:
-        if close:
-            conn.close()

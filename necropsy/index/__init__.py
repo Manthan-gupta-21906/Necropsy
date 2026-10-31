@@ -1,14 +1,21 @@
 # necropsy/index/__init__.py — Index package
 # -------------------------------------------
 # Public API:
-#   • build_index(repo_id, model_name) -> dict with progress
-#   • retrieve(query, as_of, k) -> list of (commit_hash, similarity, item_at)
-#   • get_sorted_items(repo_id, model) -> (item_refs, item_ats, vectors)
+#   • embed_text / compute_embeddings  -> local embedding model
+#   • store_embeddings                 -> persist vectors
+#   • get_embeddings_by_date           -> date-prefix slice (binary search)
+#   • retrieve                         -> top-k commits dated <= as_of
 
-from .embed import embed_text, compute_embeddings
+from .embed import embed_text, compute_embeddings, get_embed_state, warmup_async
 from .store import store_embeddings, get_embeddings_by_date
+from .retrieve import retrieve
 
-# retrieve is imported directly from the module when needed
-# from . import retrieve  # disabled to avoid import issues
-
-__all__ = ["store_embeddings", "get_embeddings_by_date"]
+__all__ = [
+    "embed_text",
+    "compute_embeddings",
+    "get_embed_state",
+    "warmup_async",
+    "store_embeddings",
+    "get_embeddings_by_date",
+    "retrieve",
+]

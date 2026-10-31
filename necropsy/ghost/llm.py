@@ -1,241 +1,344 @@
 # necropsy/ghost/llm.py — Ollama client with schema-constrained output
 # -------------------------------------------------------------------
 # Responsibilities:
-#   • Chat with Ollama using thinking=disabled
-#   • Enforce JSON-schema output (remembers, answer, claims[])
+#   • Report the REAL Ollama state (reachable, model, model_installed)
+#   • Chat with Ollama using thinking disabled and a JSON schema
 #   • One retry on transient failure
 #   • Clear error messages: model missing, Ollama down, timeout, bad JSON
 #   • Never fake inference; always report real status
+#
+# Cold-loading qwen3:8b on a laptop CPU can take ~85 s, so the generation
+# timeout comes from config (180 s by default) and `keep_alive` keeps the
+# model resident between requests.
 
 import json
-import time
 import logging
+import threading
+import time
 from typing import Optional, Dict, Any, List
 
 import requests
 
-from ..config import LLM_MODEL, LLM_FALLBACK, LLM_TIMEOUT, LLM_RETRY, LLM_THINKING_DISABLED
+from ..config import (
+    LLM_MODEL,
+    LLM_TIMEOUT,
+    LLM_RETRY,
+    LLM_THINKING_DISABLED,
+    LLM_KEEP_ALIVE,
+    OLLAMA_BASE_URL,
+)
 
 logger = logging.getLogger(__name__)
 
+# Short timeout for status probes so /health never blocks the UI.
+PROBE_TIMEOUT = 2.0
+
 
 class OllamaError(RuntimeError):
-    """Base Ollama error with helpful user message."""
-    pass
+    """Base Ollama error with a helpful user message."""
+
+    def __init__(self, message: str, code: str = "ollama_error"):
+        super().__init__(message)
+        self.code = code
 
 
 class ModelMissingError(OllamaError):
     """The requested model is not available on Ollama."""
-    pass
+
+    def __init__(self, message: str):
+        super().__init__(message, code="model_missing")
 
 
 class OllamaDownError(OllamaError):
     """Ollama server is not reachable."""
-    pass
+
+    def __init__(self, message: str):
+        super().__init__(message, code="ollama_down")
 
 
-class JSONVerifyError(RuntimeError):
-    """Model returned invalid JSON after retry."""
-    pass
+class OllamaTimeoutError(OllamaError):
+    """The model did not answer within the configured timeout."""
+
+    def __init__(self, message: str):
+        super().__init__(message, code="timeout")
 
 
-def _check_ollama_health() -> bool:
-    """Ping Ollama server at localhost:11434/api/tags.
+class JSONVerifyError(OllamaError):
+    """Model returned invalid JSON after the retry."""
 
-    Returns True if the server is reachable and the model is available.
+    def __init__(self, message: str):
+        super().__init__(message, code="invalid_json")
+
+
+# --- Warm-up state (read by /health) ---------------------------------------
+
+_WARMUP_LOCK = threading.Lock()
+_WARMUP = {
+    "state": "not_started",   # not_started | warming | warm | error
+    "message": None,
+}
+_WARMUP_THREAD: Optional[threading.Thread] = None
+
+
+def get_warmup_state() -> dict:
+    """Return the real LLM warm-up state."""
+    with _WARMUP_LOCK:
+        return dict(_WARMUP)
+
+
+def _set_warmup(state: str, message: Optional[str] = None) -> None:
+    with _WARMUP_LOCK:
+        _WARMUP["state"] = state
+        _WARMUP["message"] = message
+
+
+# --- Status probes ---------------------------------------------------------
+
+def check_ollama(model_name: Optional[str] = None) -> Dict[str, Any]:
+    """Probe Ollama with a short timeout and return the real state.
+
+    Returns:
+        {reachable: bool, model: str, model_installed: bool, error: str|None,
+         models: [names], base_url: str}
     """
+    model_name = model_name or LLM_MODEL
+    result: Dict[str, Any] = {
+        "reachable": False,
+        "model": model_name,
+        "model_installed": False,
+        "models": [],
+        "error": None,
+        "error_kind": None,
+        "base_url": OLLAMA_BASE_URL,
+    }
     try:
-        resp = requests.get(
-            "http://localhost:11434/api/tags",
-            timeout=5,
+        resp = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=PROBE_TIMEOUT)
+    except requests.exceptions.Timeout:
+        result["error"] = (
+            f"Ollama at {OLLAMA_BASE_URL} did not answer within "
+            f"{PROBE_TIMEOUT:.0f}s (it may be busy loading a model)"
         )
-        if resp.status_code != 200:
-            return False
-        models = resp.json().get("models", [])
-        return any(LLM_MODEL in m.get("name", "") for m in models)
-    except (requests.ConnectionError, requests.TimeoutError):
-        return False
+        result["error_kind"] = "timeout"
+        return result
+    except requests.exceptions.RequestException as exc:
+        result["error"] = (
+            f"Ollama not reachable at {OLLAMA_BASE_URL}: {type(exc).__name__}"
+        )
+        result["error_kind"] = "connection"
+        return result
 
+    if resp.status_code != 200:
+        result["error"] = f"Ollama /api/tags returned HTTP {resp.status_code}"
+        result["error_kind"] = "http"
+        return result
 
-def model_available(model_name: str = None) -> bool:
-    """Check if a model is available on the local Ollama server."""
-    if model_name is None:
-        model_name = LLM_MODEL
     try:
-        resp = requests.get(
-            "http://localhost:11434/api/tags",
-            timeout=5,
+        names = [m.get("name", "") for m in resp.json().get("models", [])]
+    except ValueError:
+        result["error"] = "Ollama /api/tags returned invalid JSON"
+        result["error_kind"] = "invalid_json"
+        return result
+
+    result["reachable"] = True
+    result["models"] = names
+    # Exact tag match first, then a tolerant match ("qwen3" -> "qwen3:8b").
+    result["model_installed"] = any(
+        n == model_name or n.split(":")[0] == model_name for n in names
+    )
+    return result
+
+
+def model_available(model_name: Optional[str] = None) -> bool:
+    """True when Ollama is reachable and the model tag is installed."""
+    return bool(check_ollama(model_name)["model_installed"])
+
+
+def ensure_model_loaded(model_name: Optional[str] = None) -> None:
+    """Raise a friendly error if Ollama is down or the model is missing."""
+    model_name = model_name or LLM_MODEL
+    status = check_ollama(model_name)
+    if not status["reachable"]:
+        raise OllamaDownError(
+            f"Ollama is not reachable at {OLLAMA_BASE_URL}. "
+            "Start it with `ollama serve` and try again."
         )
-        if resp.status_code != 200:
-            return False
-        models = resp.json().get("models", [])
-        return any(model_name in m.get("name", "") for m in models)
-    except (requests.ConnectionError, requests.TimeoutError):
-        return False
-
-
-def ensure_model_loaded(model_name: str = None) -> None:
-    """Ensure the model is available; raise ModelMissingError if not.
-
-    If the model is not loaded, attempt to pull it.
-    If pulling fails, raise an error with the exact `ollama pull` command.
-    """
-    if model_name is None:
-        model_name = LLM_MODEL
-
-    if not model_available(model_name):
+    if not status["model_installed"]:
         raise ModelMissingError(
-            f"Model '{model_name}' is not available on Ollama. "
-            f"Pull it with: `ollama pull {model_name}`"
+            f"Model '{model_name}' is not installed on Ollama. "
+            f"Install it with: ollama pull {model_name}"
         )
 
+
+def warmup_async(model_name: Optional[str] = None) -> None:
+    """Send one tiny request in a background thread to load the model.
+
+    qwen3:8b takes a long time to cold-load; doing it at startup means the
+    first real séance does not pay that cost. Idempotent.
+    """
+    global _WARMUP_THREAD
+
+    with _WARMUP_LOCK:
+        if _WARMUP_THREAD is not None and _WARMUP_THREAD.is_alive():
+            return
+
+    model_name = model_name or LLM_MODEL
+
+    def _run() -> None:
+        status = check_ollama(model_name)
+        if not status["reachable"]:
+            _set_warmup("error", "Ollama is not reachable. Run `ollama serve`.")
+            return
+        if not status["model_installed"]:
+            _set_warmup(
+                "error",
+                f"Model '{model_name}' is not installed. Run: ollama pull {model_name}",
+            )
+            return
+
+        _set_warmup("warming", f"Loading {model_name} into memory")
+        try:
+            resp = requests.post(
+                f"{OLLAMA_BASE_URL}/api/chat",
+                json={
+                    "model": model_name,
+                    "messages": [{"role": "user", "content": "Reply with OK."}],
+                    "stream": False,
+                    "think": False,
+                    "keep_alive": LLM_KEEP_ALIVE,
+                    "options": {"temperature": 0.0, "num_predict": 4},
+                },
+                timeout=LLM_TIMEOUT,
+            )
+            if resp.status_code != 200:
+                _set_warmup("error", f"Ollama warm-up returned HTTP {resp.status_code}")
+                return
+            _set_warmup("warm", f"{model_name} loaded")
+        except requests.exceptions.Timeout:
+            _set_warmup(
+                "error",
+                f"Warm-up timed out after {LLM_TIMEOUT}s. "
+                "The model may still load on the first request.",
+            )
+        except requests.exceptions.RequestException as exc:
+            _set_warmup("error", f"Warm-up failed: {type(exc).__name__}: {exc}")
+
+    _WARMUP_THREAD = threading.Thread(target=_run, name="llm-warmup", daemon=True)
+    _WARMUP_THREAD.start()
+
+
+# --- Chat -----------------------------------------------------------------
 
 def chat(
     model: str = LLM_MODEL,
-    messages: List[Dict[str, Any]] = None,
-    schema: Dict[str, Any] = None,
-    format: str = "json",
+    messages: Optional[List[Dict[str, Any]]] = None,
+    schema: Optional[Dict[str, Any]] = None,
     timeout: int = LLM_TIMEOUT,
     retry: bool = LLM_RETRY,
 ) -> Dict[str, Any]:
-    """Send a chat request to Ollama with JSON-schema output.
-
-    Args:
-        model: Ollama model name
-        messages: list of {role, content} messages
-        schema: JSON schema for structured output
-        format: "json" or "text"
-        timeout: seconds before timeout
-        retry: whether to retry once on transient failure
-
-    Returns:
-        Parsed JSON dict from the model response.
+    """Send a chat request to Ollama and return parsed JSON.
 
     Raises:
-        ModelMissingError: model not available
-        OllamaDownError: Ollama server unreachable
-        JSONVerifyError: model didn't return valid JSON after retry
+        OllamaDownError, ModelMissingError, OllamaTimeoutError, JSONVerifyError
     """
-    # Ensure model is available
     ensure_model_loaded(model)
 
-    # Build the chat payload
-    payload = {
+    payload: Dict[str, Any] = {
         "model": model,
-        "messages": messages or [],
+        "messages": list(messages or []),
         "stream": False,
-        "options": {
-            "temperature": 0.0,
-        },
+        # qwen3 supports disabling its thinking trace; required for JSON.
+        "think": not LLM_THINKING_DISABLED,
+        "keep_alive": LLM_KEEP_ALIVE,
+        "options": {"temperature": 0.0},
     }
-
-    # Disable thinking if configured
-    if LLM_THINKING_DISABLED:
-        if "thinking" not in payload.get("options", {}):
-            payload["options"] = payload.get("options", {})
-        payload["options"]["thinking"] = False
-
-    # Add JSON format directive if schema provided
     if schema:
-        payload["format"] = "json"
-        # Add system instruction for structured output
-        if not any(m.get("role") == "system" for m in messages):
-            payload["messages"].insert(
-                0,
-                {"role": "system", "content": "Respond with valid JSON only matching the given schema. No prose, no explanations."},
-            )
+        # Ollama accepts a JSON schema here and constrains generation to it.
+        payload["format"] = schema
 
-    # Attempt(s)
-    last_error = None
-    for attempt in range(2 if retry else 1):
+    attempts = 2 if retry else 1
+    last_error: Optional[Exception] = None
+
+    for attempt in range(attempts):
+        start = time.time()
         try:
-            start = time.time()
             resp = requests.post(
-                "http://localhost:11434/api/chat",
+                f"{OLLAMA_BASE_URL}/api/chat",
                 json=payload,
                 timeout=timeout,
             )
-            latency_ms = int((time.time() - start) * 1000)
-
-            if resp.status_code != 200:
-                raise OllamaDownError(
-                    f"Ollama server returned status {resp.status_code}"
-                )
-
-            raw = resp.json()
-            content = raw.get("message", {}).get("content", "")
-
-            # Try to parse as JSON
-            try:
-                parsed = json.loads(content)
-                return {
-                    "success": True,
-                    "content": content,
-                    "parsed": parsed,
-                    "latency_ms": latency_ms,
-                }
-            except json.JSONDecodeError:
-                # Not raw JSON; check if it's a code block or mixed
-                # Try to extract JSON from the content
-                parsed = _extract_json_from_text(content)
-                if parsed:
-                    return {
-                        "success": True,
-                        "content": content,
-                        "parsed": parsed,
-                        "latency_ms": latency_ms,
-                    }
-
-            # If we get here, JSON not found
-            last_error = JSONVerifyError(
-                f"Model did not return valid JSON. Content: {content[:200]}"
+        except requests.exceptions.Timeout:
+            last_error = OllamaTimeoutError(
+                f"The model did not answer within {timeout}s. "
+                f"Cold-loading {model} can take a minute or two; try again."
             )
-            if attempt == 0 and retry:
-                continue  # one retry
-            raise last_error
-
-        except (requests.ConnectionError, requests.TimeoutError) as e:
+            logger.warning("Ollama timeout on attempt %s", attempt + 1)
+            continue
+        except requests.exceptions.RequestException as exc:
             last_error = OllamaDownError(
-                f"Ollama server unreachable: {e}"
+                f"Ollama is not reachable at {OLLAMA_BASE_URL}: {type(exc).__name__}. "
+                "Start it with `ollama serve`."
             )
-            if attempt == 0 and retry:
-                continue  # one retry
-            raise last_error
+            logger.warning("Ollama request failed on attempt %s: %s", attempt + 1, exc)
+            continue
 
-        except OllamaError:
-            raise
-        except Exception as e:
-            last_error = OllamaError(f"Unexpected error: {e}")
-            if attempt == 0 and retry:
-                continue
-            raise last_error
+        latency_ms = int((time.time() - start) * 1000)
 
-    # Exhausted retries
-    raise last_error or OllamaDownError("Ollama request failed")
+        if resp.status_code == 404:
+            last_error = ModelMissingError(
+                f"Model '{model}' is not installed on Ollama. "
+                f"Install it with: ollama pull {model}"
+            )
+            break
+        if resp.status_code != 200:
+            last_error = OllamaDownError(
+                f"Ollama returned HTTP {resp.status_code}: {resp.text[:200]}"
+            )
+            continue
+
+        try:
+            body = resp.json()
+        except ValueError:
+            last_error = JSONVerifyError("Ollama returned a non-JSON response body.")
+            continue
+
+        content = (body.get("message") or {}).get("content", "")
+        parsed = _extract_json_from_text(content)
+        if isinstance(parsed, dict):
+            return {
+                "success": True,
+                "content": content,
+                "parsed": parsed,
+                "latency_ms": latency_ms,
+                "model": model,
+            }
+
+        last_error = JSONVerifyError(
+            "The model did not return valid JSON. "
+            f"First 200 chars: {content[:200]!r}"
+        )
+        logger.warning("Invalid JSON from model on attempt %s", attempt + 1)
+
+    raise last_error or OllamaError("Ollama request failed for an unknown reason.")
 
 
 def _extract_json_from_text(text: str) -> Optional[Dict[str, Any]]:
-    """Try to extract a JSON object from text that may contain prose.
-
-    Looks for the first {...} block or the entire text if it's valid JSON.
-    """
+    """Extract the first JSON object from text that may include prose."""
+    if not text:
+        return None
     text = text.strip()
 
-    # Try the whole text as JSON first
     try:
-        return json.loads(text)
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else None
     except json.JSONDecodeError:
         pass
 
-    # Find the innermost {...} block
-    # Simple approach: find first { and last }
     start = text.find("{")
     end = text.rfind("}")
     if start >= 0 and end > start:
-        candidate = text[start : end + 1]
         try:
-            return json.loads(candidate)
+            parsed = json.loads(text[start : end + 1])
+            return parsed if isinstance(parsed, dict) else None
         except json.JSONDecodeError:
-            pass
-
+            return None
     return None

@@ -1,10 +1,22 @@
 # necropsy/ingest/__init__.py — Ingest package
 # --------------------------------------------
 # Public API:
-#   • ingest_repo(source, repo_id) -> dict with status/progress
-#   • RepoStatus enum: pending, ingesting, indexing, ready, failed
+#   • validate_source(source) -> (ok, reason)
+#   • clone_repo(source, target) -> (ok, error)
+#   • extract_commits / extract_files_changed / extract_tombstones
 
-from .git import validate_source, clone_repo, extract_commits, extract_authors, extract_files_changed, extract_tombstones
+from .git import (
+    validate_source,
+    clone_repo,
+    extract_commits,
+    extract_files_changed,
+    extract_tombstones,
+)
 
-__all__ = ["validate_source", "clone_repo", "extract_commits", "extract_authors",
-           "extract_files_changed", "extract_tombstones"]
+__all__ = [
+    "validate_source",
+    "clone_repo",
+    "extract_commits",
+    "extract_files_changed",
+    "extract_tombstones",
+]

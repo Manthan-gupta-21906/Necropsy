@@ -1,228 +1,136 @@
-"""
-Mandatory date-leak test for Necropsy.
+"""Mandatory date-leak test for Necropsy.
 
-Builds a fixture repo with known commit dates and asserts that every layer
-(retrieval, graveyard, autopsy stats) respects the as_of date boundary.
+Builds a real fixture repo with known commit dates, stores real embeddings in
+a temporary database, and asserts that retrieval, the embedding slice, the
+prompt and the verifier all stop at as_of.
+
 Nothing dated after as_of may reach the LLM prompt, the verifier, or any
 displayed statistic.
-
-Run with:  python -m pytest tests/test_dateleak.py -v
 """
 
-import os
-import sys
-import tempfile
-import shutil
-import subprocess
+import pytest
 
-# Add necropsy to path before imports
-necropsy_dir = os.path.join(os.path.dirname(__file__), "..", "necropsy")
-if necropsy_dir not in sys.path:
-    sys.path.insert(0, necropsy_dir)
-
-from necropsy.db import init_db, add_repo, add_commits
-from necropsy.ingest.git import extract_commits
+from necropsy import config
+from necropsy.ghost.prompt import build_prompt
+from necropsy.ghost.verify import verify_claims
 from necropsy.index.retrieve import retrieve
+from necropsy.index.store import get_embeddings_by_date
+
+AS_OF_CASES = [
+    # as_of, expected surviving subjects
+    ("2024-01-01", set()),
+    ("2024-01-15", {"Jan initial commit"}),
+    ("2024-02-01", {"Jan initial commit"}),
+    ("2024-02-10", {"Jan initial commit", "Feb feature add"}),
+    ("2024-02-15", {"Jan initial commit", "Feb feature add"}),
+    ("2024-03-20", {"Jan initial commit", "Feb feature add", "Mar cleanup pass"}),
+]
 
 
-def create_fixture_repo():
-    """Create a fixture git repo with 3 commits on known dates.
-
-    Returns the workdir path.
-    """
-    workdir = tempfile.mkdtemp(prefix="necropsy_fixture_")
-
-    subprocess.run(["git", "init"], cwd=workdir, capture_output=True)
-    subprocess.run(
-        ["git", "config", "user.name", "Test Author"],
-        cwd=workdir, capture_output=True
+def test_embeddings_are_really_stored(indexed_repo):
+    """The test must not pass vacuously: embeddings have to exist."""
+    assert indexed_repo["embeddings"] == 3
+    refs, vecs, ats = get_embeddings_by_date(
+        indexed_repo["repo_id"], config.EMBED_MODEL, "2024-03-31T23:59:59Z"
     )
-    subprocess.run(
-        ["git", "config", "user.email", "test@example.com"],
-        cwd=workdir, capture_output=True
-    )
-
-    # Commit A: 2024-01-15
-    with open(os.path.join(workdir, "README.md"), "w") as f:
-        f.write("# Initial\n")
-    subprocess.run(["git", "add", "README.md"], cwd=workdir, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "--allow-empty", "-m", "Jan initial commit"],
-        cwd=workdir, capture_output=True,
-        env={**os.environ,
-            "GIT_AUTHOR_DATE": "2024-01-15T10:00:00Z",
-            "GIT_COMMITTER_DATE": "2024-01-15T10:00:00Z"},
-    )
-
-    # Commit B: 2024-02-10
-    with open(os.path.join(workdir, "feature.py"), "w") as f:
-        f.write("def feature(): pass\n")
-    subprocess.run(["git", "add", "feature.py"], cwd=workdir, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "--allow-empty", "-m", "Feb feature add"],
-        cwd=workdir, capture_output=True,
-        env={**os.environ,
-            "GIT_AUTHOR_DATE": "2024-02-10T10:00:00Z",
-            "GIT_COMMITTER_DATE": "2024-02-10T10:00:00Z"},
-    )
-
-    # Commit C: 2024-03-20
-    with open(os.path.join(workdir, "cleanup.py"), "w") as f:
-        f.write("def cleanup(): pass\n")
-    subprocess.run(["git", "add", "cleanup.py"], cwd=workdir, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "--allow-empty", "-m", "Mar cleanup pass"],
-        cwd=workdir, capture_output=True,
-        env={**os.environ,
-            "GIT_AUTHOR_DATE": "2024-03-20T10:00:00Z",
-            "GIT_COMMITTER_DATE": "2024-03-20T10:00:00Z"},
-    )
-
-    return workdir
+    assert len(refs) == 3
+    assert vecs.shape == (3, config.VECTOR_DIM)
 
 
-def test_retrieval_as_of_2024_02_01():
-    """Retrieval with as_of=2024-02-01 should ONLY include commit A (Jan 15),
-    NOT commit B (Feb 10) or C (Mar 20)."""
-    workdir = create_fixture_repo()
-    try:
-        init_db()
-        repo_id = add_repo(source=workdir, name="fixture", status="pending")
-        commits = extract_commits(workdir)
-        added = add_commits(repo_id, commits)
+@pytest.mark.parametrize("as_of,expected", AS_OF_CASES)
+def test_retrieval_never_returns_future_commits(indexed_repo, as_of, expected):
+    """Retrieval with as_of returns exactly the commits dated <= as_of."""
+    results = retrieve(indexed_repo["repo_id"], "parser cleanup feature", as_of, k=10)
+    subjects = {r["hash"] for r in results}
+    expected_hashes = {
+        indexed_repo["by_subject"][s]["hash"] for s in expected
+    }
+    assert subjects == expected_hashes
 
-        # Retrieve with as_of=2024-02-01 (should only include commit A)
-        results = retrieve(repo_id, "initial readme", "2024-02-01")
-
-        # All retrieved dates should be <= 2024-02-01
-        for r in results:
-            assert r["at"] <= "2024-02-01T00:00:00Z", (
-                f"Date-leak: result dated {r['at']} after as_of 2024-02-01: {r}"
-            )
-
-        # Commit C (Mar 20) must NOT appear
-        commit_c_hash = None
-        for c in commits:
-            if "Mar" in c.get("subject", ""):
-                commit_c_hash = c["hash"]
-                break
-        assert commit_c_hash is None or not any(
-            r["hash"] == commit_c_hash for r in results
-        ), (
-            "Date-leak: commit C (Mar 20) leaked into as_of=2024-02-01 results"
+    cutoff = config.as_of_end(as_of)
+    for result in results:
+        assert result["at"] <= cutoff, (
+            f"Date-leak: {result['at']} after as_of {as_of}"
         )
 
-        print("PASS: test_retrieval_as_of_2024_02_01")
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+
+@pytest.mark.parametrize("as_of,expected_count", [
+    ("2024-01-01", 0),
+    ("2024-02-01", 1),
+    ("2024-02-15", 2),
+    ("2024-03-31", 3),
+])
+def test_embedding_slice_stops_at_as_of(indexed_repo, as_of, expected_count):
+    """The binary-search prefix slice contains only items dated <= as_of."""
+    refs, vecs, ats = get_embeddings_by_date(
+        indexed_repo["repo_id"], config.EMBED_MODEL, config.as_of_end(as_of)
+    )
+    assert len(refs) == expected_count
+    assert len(ats) == expected_count
+    assert vecs.shape[0] == expected_count
+    for at in ats:
+        assert at <= config.as_of_end(as_of)
 
 
-def test_retrieval_as_of_2024_02_15():
-    """Retrieval with as_of=2024-02-15 should include commit A (Jan 15)
-    and commit B (Feb 10), but NOT commit C (Mar 20)."""
-    workdir = create_fixture_repo()
-    try:
-        init_db()
-        repo_id = add_repo(source=workdir, name="fixture", status="pending")
-        commits = extract_commits(workdir)
-        add_commits(repo_id, commits)
+def test_prompt_contains_no_future_evidence(indexed_repo):
+    """Evidence handed to the model never includes a post-as_of commit."""
+    as_of = "2024-02-01"
+    results = retrieve(indexed_repo["repo_id"], "feature", as_of, k=10)
+    by_hash = {c["hash"]: c for c in indexed_repo["commits"]}
+    evidence = [
+        {
+            "hash": r["hash"],
+            "at": r["at"],
+            "subject": by_hash[r["hash"]]["subject"],
+            "body": by_hash[r["hash"]].get("body", ""),
+        }
+        for r in results
+    ]
+    messages = build_prompt(as_of, "What changed?", evidence)
+    prompt_text = "\n".join(m["content"] for m in messages)
 
-        # Retrieve with as_of=2024-02-15
-        results = retrieve(repo_id, "initial readme", "2024-02-15")
-        result_dates = [r["at"] for r in results]
-        print(f"  Results as_of=2024-02-15: {result_dates}")
-
-        # All dates should be <= 2024-02-15
-        for r in results:
-            assert r["at"] <= "2024-02-15T00:00:00Z", (
-                f"Date-leak: result dated {r['at']} after as_of 2024-02-15"
-            )
-
-        # Commit C must NOT appear
-        commit_c_hash = None
-        for c in commits:
-            if "Mar" in c.get("subject", ""):
-                commit_c_hash = c["hash"]
-                break
-        assert commit_c_hash is None or not any(
-            r["hash"] == commit_c_hash for r in results
-        ), (
-            "Date-leak: commit C (Mar 20) leaked into as_of=2024-02-15 results"
-        )
-
-        print("PASS: test_retrieval_as_of_2024_02_15")
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+    mar_hash = indexed_repo["by_subject"]["Mar cleanup pass"]["hash"]
+    feb_hash = indexed_repo["by_subject"]["Feb feature add"]["hash"]
+    assert mar_hash not in prompt_text
+    assert feb_hash not in prompt_text
+    assert "2024-03-20" not in prompt_text
+    assert "2024-02-10" not in prompt_text
 
 
-def test_embeddings_date_slice():
-    """Embeddings loaded with as_of cutoff should only contain items <= as_of."""
-    workdir = create_fixture_repo()
-    try:
-        init_db()
-        repo_id = add_repo(source=workdir, name="fixture_emb", status="pending")
-        commits = extract_commits(workdir)
-        add_commits(repo_id, commits)
+def test_verifier_drops_a_future_commit_even_if_it_leaks(indexed_repo):
+    """A claim citing a post-as_of commit is removed even if it is in evidence."""
+    jan = indexed_repo["by_subject"]["Jan initial commit"]
+    mar = indexed_repo["by_subject"]["Mar cleanup pass"]
 
-        # Get embeddings slice as_of 2024-02-01
-        from necropsy.db import get_embeddings_by_date
-        refs, vecs, ats = get_embeddings_by_date(
-            repo_id, "BAAI/bge-small-en-v1.5", "2024-02-01T23:59:59Z"
-        )
+    claims = [
+        {"claim": "initial readme added", "commit_hash": jan["hash"], "support": "x"},
+        {"claim": "cleanup pass", "commit_hash": mar["hash"], "support": "y"},
+    ]
+    # Simulate the worst case: both hashes are in the evidence set.
+    evidence = {jan["hash"], mar["hash"]}
+    surviving = verify_claims(claims, indexed_repo["repo_id"], "2024-02-01", evidence)
 
-        for at in ats:
-            assert at <= "2024-02-01T23:59:59Z", (
-                f"Date-leak: embedding dated {at} after as_of cutoff"
-            )
-
-        # With a later cutoff, more items should survive
-        refs2, vecs2, ats2 = get_embeddings_by_date(
-            repo_id, "BAAI/bge-small-en-v1.5", "2024-03-31T23:59:59Z"
-        )
-        # Should have at least as many as the earlier slice
-        assert len(ats2) >= len(ats), (
-            f"Date-leak: later as_of should have more embeddings, "
-            f"got {len(ats2)} vs {len(ats)}"
-        )
-
-        print("PASS: test_embeddings_date_slice")
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+    surviving_hashes = {c["commit_hash"] for c in surviving}
+    assert mar["hash"] not in surviving_hashes
+    assert jan["hash"] in surviving_hashes
 
 
-def test_verify_claims_date_leak():
-    """Verify that claim with commit dated after as_of is dropped."""
-    workdir = create_fixture_repo()
-    try:
-        init_db()
-        repo_id = add_repo(source=workdir, name="fixture_verify", status="pending")
-        commits = extract_commits(workdir)
-        add_commits(repo_id, commits)
-
-        from necropsy.ghost.verify import verify_claims
-
-        # Claim with a non-existent commit hash should be dropped
-        claims = [
-            {
-                "claim": "test claim",
-                "commit_hash": "0000000000000000000000000000000000000000",
-                "support": "support text",
-            }
-        ]
-
-        # When evidence set is empty, claim should be dropped
-        surviving = verify_claims(claims, repo_id, "2024-01-01", set())
-        assert len(surviving) == 0, "Claim should be dropped when evidence set is empty"
-
-        print("PASS: test_verify_claims_date_leak")
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+def test_verifier_drops_claims_outside_the_evidence_set(indexed_repo):
+    """A claim citing a commit that was never shown to the model is removed."""
+    jan = indexed_repo["by_subject"]["Jan initial commit"]
+    claims = [{"claim": "initial readme", "commit_hash": jan["hash"], "support": "x"}]
+    assert verify_claims(claims, indexed_repo["repo_id"], "2024-03-31", set()) == []
 
 
-if __name__ == "__main__":
-    """Run all tests when executed directly."""
-    test_retrieval_as_of_2024_02_01()
-    test_retrieval_as_of_2024_02_15()
-    test_embeddings_date_slice()
-    test_verify_claims_date_leak()
-    print("\nAll date-leak tests PASSED!")
+def test_verifier_drops_unsupported_text(indexed_repo):
+    """A claim whose words never appear in the commit is removed."""
+    jan = indexed_repo["by_subject"]["Jan initial commit"]
+    claims = [{
+        "claim": "kubernetes autoscaling ingress controller",
+        "commit_hash": jan["hash"],
+        "support": "x",
+    }]
+    surviving = verify_claims(
+        claims, indexed_repo["repo_id"], "2024-03-31", {jan["hash"]}
+    )
+    assert surviving == []
