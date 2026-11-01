@@ -285,6 +285,8 @@ Citation validity after verification should be 100% by construction. Answer accu
 - **Limited language support** for symbol tracking; a rename inside a file is recorded as a death plus a birth.
 - **Rewritten history** (force pushes, squashed repos) limits what any tool can recover.
 - **Issues and discussions** are only included if imported.
+- **Slow on a CPU-only laptop.** With `qwen3:8b` on an 8 GB, CPU-only machine a warm séance took ~110–250 s (about 1–2 tokens/s), so the UI shows elapsed seconds and a Cancel button. `/health` stays fast (a cached snapshot) while the model works.
+- **Cancel is client-side.** Cancelling abandons the answer in the browser; Ollama may finish the abandoned generation in the background, because the request is not aborted server-side.
 
 ## Roadmap
 

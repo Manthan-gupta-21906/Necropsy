@@ -174,3 +174,137 @@ traceback server-side only.
 
 **Consequences.** `tests/test_api.py` asserts the friendly message contains the
 `ollama serve` command and no `Traceback`.
+
+---
+
+## D-011 — `/health` reads a cached snapshot, never Ollama
+
+**Problem.** `/health` called `check_ollama()` (2 s probe) and a SQLite query on
+every request. While `qwen3:8b` generated on CPU, Ollama's `/api/tags` did not
+answer within 2 s, so `/health` both blocked and reported `reachable: false`,
+`model: unknown`. The UI turned "busy" into "unreachable".
+
+**Options.** (a) Cache the probe result in the endpoint with a TTL, (b) a
+background thread that refreshes a snapshot every few seconds, (c) a separate
+health sidecar process.
+
+**Decision.** (b). `necropsy/api/server.py` keeps `_HEALTH` behind a lock; a
+daemon thread (`health-refresh`) probes Ollama every `HEALTH_REFRESH_S` (3 s)
+with the existing 2 s probe timeout, and also reads the embeddings/warm-up
+state and the last séance latency. `GET /health` copies the dict and returns it:
+no socket, no SQLite, no model on the request path.
+
+**Why.** Status must be O(1) regardless of what the model is doing. A stale
+value that is a few seconds old is far more useful than a 30 s request.
+
+**Trade-offs.** `/health` can be up to ~3 s behind reality; it reports
+`checked_at`, `age_ms` and `probe_failures` so clients can see that.
+
+**Consequences.** Tests call `refresh_health_once()` explicitly after patching
+the probe; `tests/test_health_busy.py` proves the endpoint never calls Ollama.
+
+---
+
+## D-012 — `busy` state; a timed-out probe while busy is not an outage
+
+**Problem.** During a generation the probe times out, and treating that as
+"Ollama down" was wrong: the machine was working, not broken.
+
+**Decision.** `/seance` increments a counter around the threadpool call and
+`/health` returns `busy: true`, `busy_reason: "answering"`, `status: "busy"`.
+While busy, a failed probe keeps the last known good `reachable`,
+`model_installed`, `models` and `error: null`; only `error_kind` records that
+the probe timed out. Outside a séance, failures are reported as before.
+
+**Consequences.** The UI shows "busy answering" (spectral pill) instead of
+"unreachable", and only a failure while *not* busy can turn the panel red.
+
+---
+
+## D-013 — Evidence is fitted to a character budget
+
+**Problem.** Ten evidence blocks with 200-character fields made a ~600–1000
+token prompt for a 384-dim cosine search; on CPU the prefill is a large share
+of the answer time, and the verifier accepted hashes that were retrieved but
+never shown to the model.
+
+**Decision.** `necropsy/config.py` sets `RETRIEVAL_K=6`, `RETRIEVAL_TOP_N=4`,
+`EVIDENCE_CHAR_BUDGET=1400`, `EVIDENCE_ITEM_CHARS=220`. `prompt.fit_evidence()`
+trims fields, drops whole items that do not fit and keeps at least one item;
+`_seance` builds the evidence set from the *fitted* list, so the verifier only
+accepts commits the model actually saw.
+
+**Trade-offs.** Very long commit bodies are truncated; the hash and date are
+always intact, so citations still verify.
+
+**Consequences.** Measured prompt: 4 evidence commits, 199 chars of evidence,
+1854–1992 prompt chars → 598–643 prompt tokens.
+
+---
+
+## D-014 — `num_predict=448`, `num_ctx=2048`, warm-up options must match
+
+**Problem.** Nothing bounded the output, and the warm-up request used default
+options while `chat()` used a different `num_ctx`. Ollama reloads the model
+when `num_ctx` changes, so the first séance paid a ~70 s reload.
+
+**Decision.** `LLM_NUM_PREDICT=448`, `LLM_NUM_CTX=2048` in `config.py`; both
+`chat()` and `warmup_async()` send the same `num_ctx` (and `think: false`,
+`keep_alive`). `chat()` returns and logs `prompt_eval_count`/`eval_count`.
+
+**Why 448.** A real schema-constrained answer measured 253 completion tokens
+(`done_reason: stop`); 448 leaves headroom without allowing an unbounded run.
+The prompt also asks for ≤3 claims and short strings, and the schema's
+`maxItems` is 3.
+
+**Trade-offs.** A model that wants a longer answer is cut off and retried once,
+which surfaces as a friendly `invalid_json`/timeout error rather than a hang.
+
+**Consequences.** `scripts/check_llm.py` prints the token counts of a real call.
+A full real séance on the fixture repo (4 evidence commits, 2130 prompt chars)
+measured: `prompt_tokens=718`, `completion_tokens=240`, 181 s wall clock, and
+3 proposed claims of which 1 verified — i.e. the tightened prompt produces a
+citable answer instead of the refusal.
+
+---
+
+## D-015 — `sentence-transformers` is imported lazily
+
+**Problem.** `necropsy/index/embed.py` imported `sentence_transformers` at
+module load. On this machine that import (torch + transformers) took 87–244 s,
+so uvicorn did not bind its socket for minutes and every `/health` call
+"failed" simply because nothing was listening.
+
+**Decision.** Import it inside `_load_class()`, called from `_get_model()`,
+`embed_text()` and `compute_embeddings()`. The background warm-up thread pays
+the cost; no request path does.
+
+**Trade-offs.** A missing `sentence-transformers` is reported at first use
+(`embeddings.state = "error"`) instead of at import.
+
+**Consequences.** `python -c "import necropsy.api.server"` dropped from 244 s to
+4.1 s and the server binds before the model is loaded.
+
+---
+
+## D-016 — The UI treats "busy" as work, and one failed poll as stale
+
+**Problem.** A single slow `/health` poll (the old 6 s timeout) reset the panel
+to `unknown` / `unreachable`, so a working machine looked dead.
+
+**Decision.** `web/app.js` keeps the last good snapshot in `state.health`, raises
+the health timeout to 15 s, and needs `HEALTH_FAILURE_LIMIT = 3` consecutive
+failures before showing an error. Failures 1–2 only add `.is-stale` (values
+dimmed, pill "stale"). Values are never blanked once a successful poll has been
+seen. While a séance is in flight the panel shows "busy answering" and polling
+is paused (`state.healthPaused`), then resumes with a forced poll.
+
+**Why.** Status is advisory; it must not contradict the fact that the machine is
+answering a question.
+
+**Trade-offs.** Up to ~10 s (2 polls + 3 s snapshot age) can pass before a real
+outage is shown as an outage.
+
+**Consequences.** `scripts/check_ui.py` asserts the pill is `ok` on a healthy
+server and that the Cancel button and progress line exist and start hidden.
+

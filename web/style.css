@@ -165,6 +165,11 @@ h1 {
 .pill-error { color: var(--danger); border-color: rgba(226, 104, 95, 0.45); }
 .pill-unknown { color: var(--parchment-faint); }
 .pill-ghost { color: var(--parchment-dim); }
+.pill-busy {
+    color: var(--spectral);
+    border-color: rgba(127, 215, 232, 0.35);
+    box-shadow: 0 0 14px rgba(127, 215, 232, 0.12);
+}
 .pill-spectral {
     color: var(--spectral);
     border-color: rgba(127, 215, 232, 0.35);
@@ -213,6 +218,11 @@ h1 {
     font-size: 0.88rem;
     color: var(--parchment-dim);
     overflow-wrap: anywhere;
+}
+
+/* A status panel whose last poll failed keeps its values but dims them. */
+.panel.is-stale .status-value {
+    opacity: 0.55;
 }
 
 /* --- Forms -------------------------------------------------------------- */

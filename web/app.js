@@ -19,7 +19,9 @@
     })();
 
     var TIMEOUTS = {
-        health: 6000,
+        // A cached /health answers in milliseconds; 15 s only matters if the
+        // server itself is wedged, and one slow poll must not look like an outage.
+        health: 15000,
         repos: 10000,
         exhume: 15000,
         job: 10000,
@@ -29,6 +31,7 @@
 
     var HEALTH_POLL_MS = 5000;
     var SLIDER_DEBOUNCE_MS = 300;
+    var HEALTH_FAILURE_LIMIT = 3;
 
     // --- Small DOM helpers -----------------------------------------------
 
@@ -134,6 +137,12 @@
         var limit = timeoutMs || 15000;
         var controller = new AbortController();
         var timer = setTimeout(function () { controller.abort(); }, limit);
+        if (opts.signal) {
+            if (opts.signal.aborted) { controller.abort(); }
+            else {
+                opts.signal.addEventListener('abort', function () { controller.abort(); });
+            }
+        }
         var init = {
             method: opts.method || 'GET',
             headers: opts.headers || {},
@@ -163,11 +172,17 @@
             })
             .catch(function (err) {
                 if (err && err.name === 'AbortError') {
-                    throw new ApiError(
-                        'No response within ' + Math.round(limit / 1000) + ' s. ' +
-                        'The server may still be working — try again.',
+                    // Distinguish "the user cancelled" from "the server is slow".
+                    var cancelled = !!(opts.signal && opts.signal.aborted);
+                    var wrapped = new ApiError(
+                        cancelled
+                            ? 'Cancelled.'
+                            : ('No response within ' + Math.round(limit / 1000) + ' s. ' +
+                               'The server may still be working — try again.'),
                         0, null
                     );
+                    wrapped.cancelled = cancelled;
+                    throw wrapped;
                 }
                 if (err instanceof ApiError) { throw err; }
                 throw new ApiError(
@@ -186,9 +201,15 @@
         asOf: null,
         health: null,
         healthTimer: null,
+        healthFailures: 0,
+        healthPaused: false,
         sliderTimer: null,
         indexing: false,
         seanceBusy: false,
+        seanceController: null,
+        seanceCancelled: false,
+        seanceTimer: null,
+        seanceStartedAt: 0,
         lastSeance: null
     };
 
@@ -196,11 +217,15 @@
 
     function renderHealth(health) {
         state.health = health;
+        state.healthFailures = 0;
+        el('machine-status').classList.remove('is-stale');
+
         var pill = el('status-pill');
         var note = el('status-note');
         var ollama = health.ollama || {};
         var embeddings = health.embeddings || {};
         var warmup = ollama.warmup || {};
+        var busy = health.busy === true;
 
         var status = health.status || 'unknown';
         var pillText = status;
@@ -208,6 +233,7 @@
 
         if (status === 'ok') { pillClass = 'pill pill-ok'; }
         else if (status === 'warming') { pillClass = 'pill pill-warn'; }
+        else if (status === 'busy') { pillClass = 'pill pill-busy'; pillText = 'busy answering'; }
         else if (status === 'error') { pillClass = 'pill pill-error'; }
 
         setText(pill, pillText);
@@ -223,7 +249,11 @@
         }
 
         var ollamaEl = el('status-ollama');
-        if (ollama.reachable && ollama.model_installed) {
+        if (busy) {
+            // Working is not failing: say so plainly.
+            setText(ollamaEl, 'busy answering · generating now');
+            ollamaEl.className = 'status-value is-warn';
+        } else if (ollama.reachable && ollama.model_installed) {
             setText(ollamaEl, 'reachable · model ready');
             ollamaEl.className = 'status-value is-ok';
         } else if (warmup.state === 'warming') {
@@ -257,6 +287,9 @@
 
         // One honest note explaining anything that is not right.
         var messages = [];
+        if (busy) {
+            messages.push('A séance is in flight. Status polling is paused until the ghost finishes.');
+        }
         if (ollama.error) { messages.push(ollama.error); }
         if (embeddings.state === 'error' && embeddings.message) {
             messages.push('Embeddings failed: ' + embeddings.message);
@@ -274,28 +307,64 @@
     }
 
     function renderHealthError(err) {
-        setText(el('status-pill'), 'offline');
-        el('status-pill').className = 'pill pill-error';
-        setText(el('status-model'), 'unknown');
-        setText(el('status-ollama'), 'unreachable');
-        el('status-ollama').className = 'status-value is-error';
-        setText(el('status-embeddings'), 'unknown');
-        setText(el('status-latency'), '—');
+        state.healthFailures += 1;
+
+        var panel = el('machine-status');
+        var pill = el('status-pill');
         var note = el('status-note');
-        setText(note, err.message);
+
+        // One failed or slow poll is not an outage: keep every last known
+        // value and only mark the panel as stale.
+        if (state.healthFailures < HEALTH_FAILURE_LIMIT) {
+            panel.classList.add('is-stale');
+            pill.className = 'pill pill-warn';
+            setText(pill, 'stale');
+            setText(note, 'Status is stale — the last check failed (' + err.message +
+                '). Keeping the last known values; retrying automatically.');
+            setHidden(note, false);
+            return;
+        }
+
+        panel.classList.add('is-stale');
+        pill.className = 'pill pill-error';
+        setText(pill, 'offline');
+
+        // Never blank out real values: dim them instead. Only a client that
+        // never got a successful poll shows "unknown".
+        if (!state.health) {
+            setText(el('status-model'), 'unknown');
+            setText(el('status-ollama'), 'unreachable');
+            el('status-ollama').className = 'status-value is-error';
+            setText(el('status-embeddings'), 'unknown');
+            setText(el('status-latency'), '—');
+        }
+        setText(note, err.message + ' The last known values are shown dimmed.');
         setHidden(note, false);
     }
 
-    function pollHealth() {
+    function pollHealth(force) {
+        if (state.healthPaused && !force) {
+            return Promise.resolve(null);
+        }
         return api('/health', {}, TIMEOUTS.health)
             .then(renderHealth)
             .catch(renderHealthError);
     }
 
     function startHealthPolling() {
-        pollHealth();
+        pollHealth(true);
         if (state.healthTimer) { clearInterval(state.healthTimer); }
         state.healthTimer = setInterval(pollHealth, HEALTH_POLL_MS);
+    }
+
+    function markBusyStatus() {
+        el('status-pill').className = 'pill pill-busy';
+        setText(el('status-pill'), 'busy answering');
+        setText(el('status-ollama'), 'busy answering · generating now');
+        el('status-ollama').className = 'status-value is-warn';
+        var note = el('status-note');
+        setText(note, 'A séance is in flight. Status polling is paused until the ghost finishes.');
+        setHidden(note, false);
     }
 
     // --- Repos ------------------------------------------------------------
@@ -724,12 +793,56 @@
         }
 
         var evidence = data.evidence || [];
+        var usage = data.usage || {};
+        var tokenNote = usage.total_tokens ? ' · ' + usage.total_tokens + ' tokens' : '';
         setText(el('evidence-note'),
             'Verified ' + claims.length + ' of ' + (data.claims_total || 0) +
             ' proposed claims against ' + evidence.length + ' evidence commits · ' +
-            (data.model || 'model') + ' · ' + prettyMs(data.latency_ms));
+            (data.model || 'model') + ' · ' + prettyMs(data.latency_ms) + tokenNote);
 
         setHidden(result, false);
+    }
+
+    // --- Séance progress + cancel -----------------------------------------
+
+    function updateElapsed() {
+        var seconds = Math.max(0, Math.floor((Date.now() - state.seanceStartedAt) / 1000));
+        var slow = seconds > 45
+            ? ' The first answer can take a few minutes while the local model loads.'
+            : '';
+        setText(el('seance-status'),
+            'The ghost is thinking… ' + seconds + ' s. Local CPU generation.' + slow);
+        setHidden(el('seance-status'), false);
+    }
+
+    function startElapsed() {
+        state.seanceStartedAt = Date.now();
+        updateElapsed();
+        if (state.seanceTimer) { clearInterval(state.seanceTimer); }
+        state.seanceTimer = setInterval(updateElapsed, 1000);
+    }
+
+    function stopElapsed() {
+        if (state.seanceTimer) {
+            clearInterval(state.seanceTimer);
+            state.seanceTimer = null;
+        }
+    }
+
+    function setSeanceBusy(busy) {
+        state.seanceBusy = busy;
+        var btn = el('btn-seance');
+        btn.disabled = busy;
+        setText(btn, busy ? 'Consulting…' : 'Question the Ghost');
+        setHidden(el('btn-seance-cancel'), !busy);
+        if (!busy) { stopElapsed(); }
+    }
+
+    function cancelSeance() {
+        if (!state.seanceBusy) { return; }
+        state.seanceCancelled = true;
+        setText(el('seance-status'), 'Cancelling…');
+        if (state.seanceController) { state.seanceController.abort(); }
     }
 
     function runSeance() {
@@ -760,37 +873,45 @@
             return;
         }
 
-        state.seanceBusy = true;
-        var btn = el('btn-seance');
-        btn.disabled = true;
-        setText(btn, 'Consulting…');
-        setText(statusEl, 'The ghost is thinking. The first answer can take a few minutes ' +
-            'while the local model loads.');
-        setHidden(statusEl, false);
+        state.seanceCancelled = false;
+        state.seanceController = new AbortController();
+        var controller = state.seanceController;
+
+        setSeanceBusy(true);
+        startElapsed();
+        // The machine is busy, not broken: say so and stop polling /health
+        // until the generation finishes, then resume with a fresh snapshot.
+        markBusyStatus();
+        state.healthPaused = true;
 
         var payload = { repo_id: state.repo.id, as_of: state.asOf, question: question };
         state.lastSeance = payload;
 
-        api('/seance', { method: 'POST', body: payload }, TIMEOUTS.seance)
+        api('/seance', { method: 'POST', body: payload, signal: controller.signal }, TIMEOUTS.seance)
             .then(function (data) {
-                state.seanceBusy = false;
-                btn.disabled = false;
-                setText(btn, 'Question the Ghost');
                 setHidden(statusEl, true);
                 renderSeance(data);
-                pollHealth();
             })
             .catch(function (err) {
-                state.seanceBusy = false;
-                btn.disabled = false;
-                setText(btn, 'Question the Ghost');
                 setHidden(statusEl, true);
+                if (err && err.cancelled) {
+                    setText(errEl, 'Cancelled. The model may still finish the abandoned ' +
+                        'request in the background, but its answer is discarded.');
+                    setHidden(errEl, false);
+                    return;
+                }
                 setText(errEl, err.message);
                 setHidden(errEl, false);
                 addRetry(errEl, 'Ask again', function () {
                     setHidden(errEl, true);
                     runSeance();
                 });
+            })
+            .finally(function () {
+                setSeanceBusy(false);
+                state.seanceController = null;
+                state.healthPaused = false;
+                pollHealth(true);
             });
     }
 
@@ -808,6 +929,7 @@
         el('date-slider').addEventListener('input', onSliderInput);
 
         el('btn-seance').addEventListener('click', runSeance);
+        el('btn-seance-cancel').addEventListener('click', cancelSeance);
         el('question-input').addEventListener('keydown', function (event) {
             if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
                 event.preventDefault();
@@ -815,7 +937,7 @@
             }
         });
 
-        el('btn-status-retry').addEventListener('click', pollHealth);
+        el('btn-status-retry').addEventListener('click', function () { pollHealth(true); });
     }
 
     function boot() {
