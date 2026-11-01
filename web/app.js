@@ -1,5 +1,4 @@
 // necropsy/web/app.js — Séance with the Ghost
-// ---------------------------------------------------------------
 // Static, no build step, no CDN. Every request has a timeout and every
 // failure has a human message plus a Retry button. Nothing stays on
 // "loading" forever.
@@ -217,7 +216,6 @@
 
     function renderHealth(health) {
         state.health = health;
-        state.healthFailures = 0;
         el('machine-status').classList.remove('is-stale');
 
         var pill = el('status-pill');
@@ -250,7 +248,6 @@
 
         var ollamaEl = el('status-ollama');
         if (busy) {
-            // Working is not failing: say so plainly.
             setText(ollamaEl, 'busy answering · generating now');
             ollamaEl.className = 'status-value is-warn';
         } else if (ollama.reachable && ollama.model_installed) {
@@ -940,6 +937,42 @@
         el('btn-status-retry').addEventListener('click', function () { pollHealth(true); });
     }
 
+    // --- Hash routing -----------------------------------------------------
+
+    function route() {
+        // Parse query parameters from the URL
+        var search = window.location.search;
+        var asOf = null;
+        if (search) {
+            var params = new URLSearchParams(search);
+            asOf = params.get('as_of');
+        }
+
+        var hash = window.location.hash;
+        // If there's an as_of param, force navigation to #/app
+        if (asOf) {
+            window.location.hash = '#/app' + search;
+            // Reload route to apply the new hash
+            return;
+        }
+
+        if (hash === '#/') { hash = '/'; }
+
+        // Hide all sections first
+        var sections = document.querySelectorAll('.landing, .app, #notfound');
+        sections.forEach(function (s) { setHidden(s, true); });
+
+        if (hash === '/' || hash === '') {
+            setHidden(document.getElementById('landing'), false);
+        } else if (hash === '#/app') {
+            setHidden(document.getElementById('app'), false);
+        } else {
+            setHidden(document.getElementById('notfound'), false);
+        }
+    }
+
+    // --- Boot -------------------------------------------------------------
+
     function boot() {
         wire();
         startHealthPolling();
@@ -948,6 +981,7 @@
                 setText(el('repo-source'), repo.source || '');
             }
         });
+        route();
     }
 
     if (document.readyState === 'loading') {
@@ -955,4 +989,12 @@
     } else {
         boot();
     }
+
+    // --- Hash change listener ---------------------------------------------
+
+    window.addEventListener('hashchange', route);
+
+    // Initialize routing on load
+    window.dispatchEvent(new Event('hashchange'));
+
 })();

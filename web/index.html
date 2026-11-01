@@ -7,154 +7,286 @@
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+    <!-- Skip link for keyboard users -->
+    <a class="skip-link" href="#main">Skip to main content</a>
+
+    <!-- Grain / scanline overlay -->
     <div class="grain" aria-hidden="true"></div>
 
-    <div class="container">
-        <header class="masthead">
-            <p class="eyebrow">AUTOPSY ON AN ABANDONED REPOSITORY</p>
-            <h1>Necropsy</h1>
-            <p class="tagline">A forgotten machine has awakened. It only remembers what existed on the day you choose.</p>
-        </header>
+    <!-- Top bar: sticky, always present -->
+    <header class="topbar" role="banner" aria-label="Necropsy top bar" id="machine-status">
+        <a href="/" class="wordmark" aria-label="Necropsy home">
+            <span>Necropsy</span>
+        </a>
+        <a href="#main" class="app-link">App</a>
 
-        <!-- Machine Status -->
-        <section id="machine-status" class="panel" aria-labelledby="status-heading" aria-live="polite">
-            <div class="panel-header">
-                <h2 id="status-heading" class="panel-title">Machine Status</h2>
-                <span id="status-pill" class="pill pill-unknown">checking</span>
+        <!-- Machine Status chip + popover -->
+        <div class="chip" id="status-chip" aria-haspopup="dialog"
+             aria-label="Machine Status">
+            <span id="status-pill" class="pill status-pill">checking</span>
+            <span class="status">
+                <span id="status-model">unknown</span>
+                <span class="status-sep"> · </span>
+                <span id="status-ollama">unreachable</span>
+            </span>
+        </div>
+
+        <!-- Popover: Machine Status (shown/hidden via JS) -->
+        <div class="popover" id="status-popover" role="dialog"
+             aria-label="Machine Status" aria-modal="false"
+             aria-labelledby="status-heading" hidden>
+            <div id="status-heading" class="panel-title">Machine Status</div>
+            <dl>
+                <div>
+                    <dt id="status-model-dt">Model</dt>
+                    <dd id="status-model" class="status-value is-error">unknown</dd>
+                </div>
+                <div>
+                    <dt>Ollama</dt>
+                    <dd id="status-ollama" class="status-value is-error">unreachable</dd>
+                </div>
+                <div>
+                    <dt>Embeddings</dt>
+                    <dd id="status-embeddings" class="status-value is-warn">loading</dd>
+                </div>
+                <div>
+                    <dt>Latency</dt>
+                    <dd id="status-latency">—</dd>
+                </div>
+            </dl>
+            <button id="btn-status-retry" class="btn btn-retry" style="margin-top: var(--s1); width: 100%; padding: var(--s1) var(--s2);">Retry</button>
+            <button class="close" aria-label="Close status popover">×</button>
+        </div>
+    </header>
+
+    <main id="main" tabindex="0">
+        <!-- Landing page (#/) -->
+        <section id="landing" class="landing" hidden>
+            <div class="hero">
+                <h1>Ask a dead repository what it was trying to become.</h1>
+                <p class="lead">Necropsy reads an abandoned Git repository and
+                    rebuilds a ghost that only knows what was committed before the
+                    date you choose. Every claim it makes cites a real commit,
+                    checked in code.</p>
+                <div class="ctas">
+                    <a href="#/app" class="cta primary">Begin an autopsy</a>
+                    <a href="#how-it-works" class="cta secondary">How it works</a>
+                </div>
+                <div class="live-chip" id="live-chip">
+                    <span class="pill">LIVE</span>
+                    <span class="status" id="live-status">checking…</span>
+                </div>
             </div>
-            <div class="panel-body status-grid">
-                <div class="status-item">
-                    <span class="status-label">Model</span>
-                    <span id="status-model" class="status-value">checking…</span>
-                </div>
-                <div class="status-item">
-                    <span class="status-label">Ollama</span>
-                    <span id="status-ollama" class="status-value">checking…</span>
-                </div>
-                <div class="status-item">
-                    <span class="status-label">Embeddings</span>
-                    <span id="status-embeddings" class="status-value">checking…</span>
-                </div>
-                <div class="status-item">
-                    <span class="status-label">Last answer</span>
-                    <span id="status-latency" class="status-value">—</span>
-                </div>
-            </div>
-            <p id="status-note" class="status-note" hidden></p>
-            <div class="panel-actions">
-                <button id="btn-status-retry" class="btn-ghost" type="button">Re-check now</button>
-            </div>
+
+            <section class="how-it-works">
+                <h2>How it works</h2>
+                <ol>
+                    <li>Exhume — Clone read-only and walk the history: commits, authors, files, churn.</li>
+                    <li>Embed — Turn each commit message into a vector with a local embedding model, stored sorted by date.</li>
+                    <li>Choose a date — Pick a boundary. Anything after it is never retrieved.</li>
+                    <li>Ask — The ghost answers from those commits; a verifier deletes claims no commit supports.</li>
+                </ol>
+            </section>
+
+            <section class="timepiece" aria-labelledby="time-desc">
+                <p id="time-desc" hidden>Illustrative timeline showing commit history from first to last date.</p>
+                <svg viewBox="0 0 1200 300" role="img" aria-labelledby="time-desc title">
+                    <title id="title">Illustrative timeline: commit history</title>
+                    <path class="track" d="M40 260 L1160 260"/>
+                    <line class="tick" x1="40" y1="0" x2="40" y2="260"/>
+                    <line class="tick" x1="1160" y1="0" x2="1160" y2="260"/>
+                    <text class="label" x="40" y="10">first</text>
+                    <text class="label" x="1160" y="10">last</text>
+                    <circle class="ghost" cx="40" cy="260" r="8"/>
+                    <circle class="ghost" cx="1160" cy="260" r="8"/>
+                </svg>
+            </section>
+
+            <section class="why-local">
+                <h2>Why local</h2>
+                <ul>
+                    <li>Private by default — author emails are stored as hashes only.</li>
+                    <li>No per-request cost — everything runs on 127.0.0.1 after the one-time clone and model downloads.</li>
+                    <li>Swap models — pin the exact checkpoints you trust; override with <code>NECROPSY_LLM_MODEL</code>.</li>
+                    <li>After the one-time downloads, the app works with the network disabled.</li>
+                </ul>
+            </section>
+
+            <section class="limits">
+                <h2>Honest limits</h2>
+                <p>A warm answer takes tens of seconds to minutes on a CPU‑only laptop.
+                    The verifier is strict, so refusal is a normal outcome. The ghost is
+                    only as good as the commit messages it was given.</p>
+            </section>
+
+            <footer class="footer">
+                Necropsy · <a href="https://github.com/Manthan-gupta-21906/Necropsy">GitHub</a> ·
+                MIT · <a href="/docs/">docs</a>
+            </footer>
         </section>
 
-        <main id="main-content" class="main">
-
-            <!-- Exhume -->
-            <section id="exhume-section" class="panel" aria-labelledby="exhume-heading">
-                <div class="panel-header">
-                    <h2 id="exhume-heading" class="panel-title">Exhume</h2>
-                </div>
-                <div class="panel-body">
-                    <label for="repo-source" class="field-label">Repository source</label>
-                    <p class="field-hint">An https:// or ssh:// URL, or a local folder that contains <code>.git</code>.</p>
-                    <div class="field-row">
-                        <input type="text" id="repo-source" class="input-field" autocomplete="off"
-                               spellcheck="false"
-                               placeholder="https://github.com/user/repo.git">
-                        <button id="btn-exhume" class="btn-primary" type="button">Index Repository</button>
-                    </div>
-                    <div id="exhume-progress" class="progress-wrap" hidden>
-                        <div class="progress-track">
-                            <div id="exhume-bar" class="progress-bar" style="width:0%"></div>
-                        </div>
-                        <p id="exhume-stage" class="progress-label">queued</p>
-                    </div>
-                    <p id="exhume-message" class="message" role="status" hidden></p>
-                    <p id="exhume-error" class="message message-error" role="alert" hidden></p>
-                </div>
-            </section>
-
-            <!-- Repository + time boundary -->
-            <section id="timeline-section" class="panel" aria-labelledby="timeline-heading" hidden>
-                <div class="panel-header">
-                    <h2 id="timeline-heading" class="panel-title">Time Boundary</h2>
-                    <span id="repo-name" class="pill pill-ghost">no repo</span>
-                </div>
-                <div class="panel-body">
-                    <label for="date-slider" class="field-label">
-                        The ghost may only remember up to
-                        <output id="date-display" class="date-display" for="date-slider">—</output>
-                    </label>
-                    <input type="range" id="date-slider" class="time-slider"
-                           min="0" max="1" value="1" step="1" aria-describedby="slider-bounds">
-                    <div id="slider-bounds" class="slider-bounds">
-                        <span id="bound-first">—</span>
-                        <span id="bound-last">—</span>
-                    </div>
-                </div>
-            </section>
-
-            <!-- Autopsy -->
-            <section id="autopsy-section" class="panel" aria-labelledby="autopsy-heading" hidden>
-                <div class="panel-header">
-                    <h2 id="autopsy-heading" class="panel-title">Autopsy</h2>
-                    <span id="autopsy-asof" class="pill pill-ghost">—</span>
-                </div>
-                <div class="panel-body">
-                    <p id="autopsy-loading" class="message" hidden>Reading the remains…</p>
-                    <p id="autopsy-error" class="message message-error" role="alert" hidden></p>
-                    <div id="autopsy-content">
-                        <div id="stats-grid" class="stats-grid"></div>
-                        <figure class="chart-figure">
-                            <figcaption class="chart-title">Commits per month (up to the boundary)</figcaption>
-                            <div id="activity-chart" class="chart" role="img"
-                                 aria-label="Bar chart of commits per month"></div>
-                        </figure>
-                        <div class="two-col">
+        <!-- App workspace (#/app) -->
+        <section id="app" class="app" hidden aria-label="Necropsy application">
+            <!-- App shell -->
+            <div class="shell" role="navigation" aria-label="App shell">
+                <label for="repo-select">Repository</label>
+                <select id="repo-select" name="repo-select">
+                <span id="repo-name" class="visually-hidden">no repo indexed</span>
+                    <option value="">no repo indexed</option>
+                </select>
+                <span id="repo-name" class="visually-hidden">no repo indexed</span>
+                <div>
+                    <button class="chip" id="status-chip-shell"
+                            aria-haspopup="dialog"
+                            aria-label="Machine Status">
+                        <span class="pill status-pill">checking</span>
+                        <span class="status" id="status-chip-text">
+                            <span id="status-model-shell">unknown</span>
+                            <span class="status-sep"> · </span>
+                            <span id="status-ollama-shell">unreachable</span>
+                        </span>
+                    </button>
+                    <div class="popover" id="status-popover-shell"
+                         role="dialog" aria-label="Machine Status" aria-modal="false"
+                         aria-labelledby="status-heading-shell" hidden>
+                        <div id="status-heading-shell" class="panel-title">Machine Status</div>
+                        <dl>
                             <div>
-                                <h3 class="subhead">Last commits</h3>
-                                <ul id="recent-commits" class="commit-list"></ul>
+                                <dt id="status-model-dt-shell">Model</dt>
+                                <dd id="status-model-shell" class="status-value is-error">unknown</dd>
                             </div>
                             <div>
-                                <h3 class="subhead">Graveyard</h3>
-                                <ul id="tombstones-list" class="tombstone-list"></ul>
+                                <dt>Ollama</dt>
+                                <dd id="status-ollama-shell" class="status-value is-error">unreachable</dd>
                             </div>
+                            <div>
+                                <dt>Embeddings</dt>
+                                <dd id="status-embeddings-shell" class="status-value is-warn">loading</dd>
+                            </div>
+                            <div>
+                                <dt>Latency</dt>
+                                <dd id="status-latency-shell">—</dd>
+                            </div>
+                        </dl>
+                        <button class="close" aria-label="Close status popover">×</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Time bar -->
+            <div class="timebar" aria-label="Time slider">
+                <div class="track" role="slider"
+                     aria-orientation="horizontal"
+                     aria-valuemin="0"
+                     aria-valuemax="100"
+                     aria-valuenow="0"
+                     aria-label="Commit history date slider">
+                    <div class="sparkline"></div>
+                    <input type="range" class="range"
+                           aria-valuetext="day 0 of 100" id="date-slider">
+                    <div class="min-date" id="min-date">—</div>
+                    <div class="max-date" id="max-date">—</div>
+                    <div class="date-display" id="date-display">—</div>
+                    <div class="thumb"></div>
+                </div>
+            </div>
+
+            <!-- Main workspace -->
+            <section class="workspace" role="main" id="workspace">
+
+                <!-- Exhume section -->
+                <section id="exhume-section" class="panel" hidden>
+                    <h2 class="panel-heading">Exhume</h2>
+                    <div class="panel-body">
+                        <label for="repo-source" class="visually-hidden">Repository source</label>
+                        <input type="text" id="repo-source" placeholder="https://github.com/… or local path">
+                        <button class="btn-ghost" id="btn-exhume">Index Repository</button>
+                        <div id="exhume-error" class="message-err hidden"></div>
+                        <div id="exhume-message" class="message message-ok hidden"></div>
+                        <div id="exhume-progress" class="hidden">
+                            <div id="exhume-bar" style="width:0%"></div>
+                            <span id="exhume-stage">queued · 0%</span>
                         </div>
                     </div>
-                </div>
-            </section>
+                </section>
 
-            <!-- Séance -->
-            <section id="seance-section" class="panel" aria-labelledby="seance-heading">
-                <div class="panel-header">
-                    <h2 id="seance-heading" class="panel-title">Séance</h2>
-                    <span id="seance-asof" class="pill pill-spectral">—</span>
-                </div>
-                <div class="panel-body">
-                    <label for="question-input" class="field-label">Ask the ghost</label>
-                    <textarea id="question-input" class="input-field" rows="3"
-                              placeholder="What did this project try to become?"></textarea>
-                    <div class="field-row field-row-end">
-                        <button id="btn-seance" class="btn-primary" type="button">Question the Ghost</button>
-                        <button id="btn-seance-cancel" class="btn-ghost" type="button" hidden>Cancel</button>
+                <!-- Autopsy section -->
+                <section id="autopsy-section" class="panel" hidden>
+                    <h2 class="panel-heading">Autopsy</h2>
+                    <div class="panel-body">
+                        <div id="autopsy-loading" class="hidden">
+                            <span class="spinner"></span> Loading…
+                        </div>
+                        <div id="autopsy-error" class="hidden">
+                            <span class="message-err"></span>
+                            <button class="btn-ghost" onclick="loadAutopsyRetry()">Retry</button>
+                        </div>
+                        <div id="autopsy-content" class="hidden">
+                            <div class="grid">
+                                <div class="stat"><span class="label">Commits</span><span class="value">—</span></div>
+                                <div class="stat"><span class="label">Authors</span><span class="value">—</span></div>
+                                <div class="stat"><span class="label">Additions</span><span class="value">—</span></div>
+                                <div class="stat"><span class="label">Deletions</span><span class="value">—</span></div>
+                                <div class="stat"><span class="label">Last commit</span><span class="value">—</span></div>
+                                <div class="stat"><span class="label">Tombstones</span><span class="value">—</span></div>
+                            </div>
+                            <div id="activity-chart" class="activity-chart"></div>
+                        </div>
                     </div>
-                    <p id="seance-status" class="message" role="status" hidden></p>
-                    <p id="seance-error" class="message message-error" role="alert" hidden></p>
-                    <div id="seance-result" class="seance-result" hidden>
-                        <p id="answer-text" class="answer"></p>
-                        <p id="remembers-text" class="remembers" hidden></p>
-                        <h3 class="subhead">Citations</h3>
-                        <ul id="claims-list" class="claim-list"></ul>
-                        <p id="evidence-note" class="evidence-note"></p>
+                </section>
+
+                <!-- Graveyard section -->
+                <section id="graveyard-section" class="panel" hidden>
+                    <h2 class="panel-heading">Graveyard</h2>
+                    <div class="panel-body">
+                        <p class="empty-note hidden">Nothing has died yet at this date.</p>
+                        <ul id="tombstones-list" class="tombstones-list"></ul>
                     </div>
-                </div>
+                </section>
+
+                <!-- Séance section -->
+                <section id="seance-section" class="panel" hidden>
+                    <h2 class="panel-heading">Séance</h2>
+                    <div class="panel-body">
+                        <div id="seance-result" class="seance-result hidden"></div>
+                        <div id="seance-error" class="message-err hidden"></div>
+
+                        <!-- Conversation thread -->
+                        <div id="seance-thread" class="thread" role="region"
+                             aria-label="Séance conversation" hidden></div>
+
+                        <!-- Controls -->
+                        <div class="controls" role="seance-controls" aria-live="polite">
+                        <div id="seance-status" class="elapsed" hidden>
+                            The ghost is thinking� 0 s. Local CPU generation.
+                        </div>
+
+                            <textarea id="question-input"
+                                placeholder="Ask the ghost a question..."
+                                aria-label="Your question for the ghost"></textarea>
+                            <div>
+                                <button class="btn" id="btn-seance">Question the Ghost</button>
+                                <button class="btn cancel" id="btn-seance-cancel" hidden>
+                                    Cancel
+                                </button>
+                            </div>
+                            <div id="seance-status" class="elapsed"The ghost is thinking… 0 s. Local CPU generation.</div>
+                        </div>
+
+                        <!-- Suggested question chips -->
+                        <div id="question-chips" class="question-chips" hidden></div>
+                    </div>
+                </section>
             </section>
+        </section>
 
-        </main>
-
-        <footer class="footer">
-            <p>Local models only: Ollama + sentence-transformers. No CDN, no telemetry, no API keys.</p>
-        </footer>
-    </div>
+        <!-- Not-found state -->
+        <section id="notfound" class="notfound" hidden aria-label="Not found">
+            <h2>Not found</h2>
+            <p>The page you're looking for doesn't exist.</p>
+            <button onclick="window.location.hash='/'">Go home</button>
+        </section>
+    </main>
 
     <script src="/static/app.js"></script>
 </body>
