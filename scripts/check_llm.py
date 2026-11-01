@@ -45,4 +45,5 @@ elapsed = time.time() - start
 
 print(f"wall clock: {elapsed:.2f}s")
 print(f"reported latency_ms: {result['latency_ms']}")
+print("tokens:", json.dumps(result.get("usage"), indent=2))
 print("parsed JSON:", json.dumps(result["parsed"], indent=2))

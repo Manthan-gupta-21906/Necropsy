@@ -17,10 +17,36 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-try:
-    from sentence_transformers import SentenceTransformer
-except ImportError:  # pragma: no cover - depends on environment
-    SentenceTransformer = None  # type: ignore
+# sentence-transformers pulls in torch and transformers, which can take a
+# minute or more to import on a cold CPU laptop. Importing it at module load
+# would delay the server socket (and therefore /health) by that long, so the
+# import is deferred to the first real use: the background warm-up thread.
+# It is never done inside a request.
+SentenceTransformer = None  # type: ignore[assignment]
+_IMPORT_LOCK = threading.Lock()
+_IMPORT_ERROR: Optional[str] = None
+
+
+def _load_class():
+    """Import and cache SentenceTransformer, or raise a friendly ImportError."""
+    global SentenceTransformer, _IMPORT_ERROR
+
+    with _IMPORT_LOCK:
+        if SentenceTransformer is not None:
+            return SentenceTransformer
+        if _IMPORT_ERROR is not None:
+            raise ImportError(_IMPORT_ERROR)
+        try:
+            from sentence_transformers import SentenceTransformer as _ST
+        except ImportError as exc:
+            _IMPORT_ERROR = (
+                "sentence-transformers not installed. "
+                "Install with: pip install sentence-transformers"
+            )
+            raise ImportError(_IMPORT_ERROR) from exc
+        SentenceTransformer = _ST
+        return SentenceTransformer
+
 
 _MODEL = None
 _MODEL_NAME = None
@@ -59,11 +85,7 @@ def _get_model(model_name: str = None) -> "SentenceTransformer":
     """
     global _MODEL, _MODEL_NAME
 
-    if SentenceTransformer is None:
-        raise ImportError(
-            "sentence-transformers not installed. "
-            "Install with: pip install sentence-transformers"
-        )
+    _load_class()
 
     model_name = model_name or "BAAI/bge-small-en-v1.5"
 
@@ -114,11 +136,7 @@ def embed_text(text: str, model_name: str = None) -> List[float]:
 
     Returns list of floats (L2-normalized).
     """
-    if SentenceTransformer is None:
-        raise ImportError(
-            "sentence-transformers not installed. "
-            "Install with: pip install sentence-transformers"
-        )
+    _load_class()
     model = _get_model(model_name)
     # encode returns numpy array; flatten defensively then convert to list
     vec = model.encode(text, normalize_embeddings=True)
@@ -136,10 +154,7 @@ def compute_embeddings(
 
     Returns list of L2-normalized float lists (one per text).
     """
-    if SentenceTransformer is None:
-        raise ImportError(
-            "sentence-transformers not installed."
-        )
+    _load_class()
     model = _get_model(model_name)
     vecs = model.encode(
         texts,

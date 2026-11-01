@@ -215,6 +215,17 @@ def main() -> int:
         results.append(("six or more stat cards", count_class(dom, "stat-label") >= 6))
         results.append(("three recent commits at last date",
                         len(re.findall(r'class="commit-hash"', dom)) >= 3))
+        # The séance progress line and the Cancel button exist and start hidden.
+        print("--- séance controls ---")
+        print("  seance-status      =", repr(text_of(dom, "seance-status")),
+              "hidden =", bool(re.search(r'id="seance-status"[^>]*\bhidden\b', dom)))
+        print("  cancel button      =",
+              bool(re.search(r'id="btn-seance-cancel"', dom)),
+              "hidden =", bool(re.search(r'id="btn-seance-cancel"[^>]*\bhidden\b', dom)))
+        results.append(("séance cancel button exists and starts hidden",
+                        bool(re.search(r'id="btn-seance-cancel"[^>]*\bhidden\b', dom))))
+        results.append(("séance progress element exists and starts hidden",
+                        bool(re.search(r'id="seance-status"[^>]*\bhidden\b', dom))))
 
         # --- deep link to an earlier boundary ----------------------------
         dom2, errors2 = dump_dom(chrome, base + "/?as_of=2024-01-31", profile)

@@ -7,7 +7,7 @@
 #   • Enforce that the ghost answers as the project, not as a named maintainer
 #   • Include strict JSON schema constraint
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 # JSON schema handed to Ollama so generation is constrained to this shape.
 SEANCE_SCHEMA: Dict[str, Any] = {
@@ -17,7 +17,7 @@ SEANCE_SCHEMA: Dict[str, Any] = {
         "answer": {"type": "string"},
         "claims": {
             "type": "array",
-            "maxItems": 5,
+            "maxItems": 3,
             "items": {
                 "type": "object",
                 "properties": {
@@ -54,14 +54,13 @@ def build_prompt(
     Returns:
         A list of message dicts [system, user] ready for Ollama chat.
     """
-    from ..config import EMBED_MODEL
+    from ..config import LLM_MODEL as _lm
 
     if model_name is None:
-        from ..config import LLM_MODEL as _lm
         model_name = _lm
 
-    # Build evidence block from retrieved commits
-    evidence_text = _format_evidence(evidence)
+    # Build evidence block from retrieved commits, truncated to the budget.
+    evidence_text = _format_evidence(fit_evidence(evidence))
 
     # Construct the prompt
     system_content = _system_prompt(as_of, model_name)
@@ -77,6 +76,10 @@ Instructions:
 - Answer the question using ONLY the evidence above.
 - If the evidence cannot answer the question, say: "The dead do not remember that."
 - Quote commit messages verbatim when supporting your answer.
+- Phrase each "claim" with the commit's own words (the verifier compares your
+  claim to the commit text, so paraphrase with the same words it uses).
+- Be brief: keep "remembers" and "answer" under 25 words each, each claim
+  under 15 words and each "support" under 10 words.
 - Provide your answer in strict JSON matching this schema:
   {{
     "remembers": "<what the project remembers/knows, or empty string>",
@@ -90,7 +93,7 @@ Instructions:
     ]
   }}
   Only include claims that are genuinely supported by the evidence.
-  At most 5 claims. If no claim is supported, set answer to "The dead do not remember that." and claims to []."""
+  At most 3 claims. If no claim is supported, set answer to "The dead do not remember that." and claims to []."""
 
     return [
         {"role": "system", "content": system_content},
@@ -119,7 +122,7 @@ def _format_evidence(evidence: List[Dict[str, Any]]) -> str:
         return "[No evidence retrieved]"
 
     parts = []
-    for i, ev in enumerate(evidence[:10], 1):  # max 10 evidence items
+    for i, ev in enumerate(evidence, 1):
         hash_val = ev.get("hash", "unknown")
         at = ev.get("at", "unknown date")
         subject = (ev.get("subject") or "")[:200]
@@ -132,3 +135,44 @@ def _format_evidence(evidence: List[Dict[str, Any]]) -> str:
         parts.append(line)
 
     return "\n".join(parts)
+
+
+def fit_evidence(
+    evidence: List[Dict[str, Any]],
+    budget_chars: Optional[int] = None,
+    max_items: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Keep the highest-ranked evidence that fits the character budget.
+
+    Retrieval is already ordered best-first and already date-filtered, so
+    dropping the tail never removes an item dated after as_of. Each field is
+    trimmed first, then whole items are dropped, then the last item's text is
+    cut to size. At least one item is kept whenever evidence is non-empty.
+
+    This matters on CPU: fewer prompt tokens means a much shorter prefill and
+    a faster answer, and it also bounds what the model can cite.
+    """
+    from ..config import EVIDENCE_CHAR_BUDGET, EVIDENCE_ITEM_CHARS, RETRIEVAL_TOP_N
+
+    budget = EVIDENCE_CHAR_BUDGET if budget_chars is None else budget_chars
+    limit = RETRIEVAL_TOP_N if max_items is None else max_items
+
+    fitted: List[Dict[str, Any]] = []
+    used = 0
+    for ev in list(evidence)[: max(0, limit)]:
+        item = dict(ev)
+        item["subject"] = (item.get("subject") or "")[:EVIDENCE_ITEM_CHARS]
+        item["body"] = (item.get("body") or "")[:EVIDENCE_ITEM_CHARS]
+        cost = len(_format_evidence([item]))
+        if fitted and used + cost > budget:
+            break
+        if not fitted and cost > budget:
+            # Always show something: trim the first item's text to the budget.
+            overflow = cost - budget
+            subject = item["subject"]
+            item["subject"] = subject[: max(0, len(subject) - overflow)]
+            item["body"] = ""
+            cost = len(_format_evidence([item]))
+        fitted.append(item)
+        used += cost
+    return fitted

@@ -55,7 +55,7 @@ from ..ghost.llm import (
     get_warmup_state,
     warmup_async as warmup_llm,
 )
-from ..ghost.prompt import SEANCE_SCHEMA, build_prompt
+from ..ghost.prompt import SEANCE_SCHEMA, build_prompt, fit_evidence
 from ..ghost.verify import verify_claims
 from ..index import get_embed_state, retrieve, store_embeddings, warmup_async as warmup_embeddings
 from ..ingest.git import (
@@ -83,6 +83,9 @@ async def lifespan(_app: FastAPI):
     init_db()
     warmup_embeddings(EMBED_MODEL)
     warmup_llm(LLM_MODEL)
+    # The status snapshot is refreshed off the request path, so /health can
+    # answer instantly even while the model is generating.
+    start_health_refresher()
     logger.info(
         "Necropsy started: db=%s embed=%s llm=%s",
         config.db_path(), EMBED_MODEL, LLM_MODEL,
@@ -144,6 +147,65 @@ def root() -> FileResponse:
 
 
 # --- Health ----------------------------------------------------------------
+#
+# /health must answer in milliseconds even while a slow CPU generation is in
+# flight. It therefore NEVER talks to Ollama or SQLite: a background thread
+# refreshes a cached snapshot every few seconds and the endpoint just returns
+# it. While a séance is generating, a probe that times out is not treated as
+# "Ollama is down" — the last known good values are kept and the state is
+# reported as busy.
+
+HEALTH_REFRESH_S = 3.0
+
+
+def _empty_ollama_state() -> Dict[str, Any]:
+    """Neutral starting point for the snapshot (before the first probe)."""
+    return {
+        "reachable": False,
+        "model": LLM_MODEL,
+        "model_installed": False,
+        "models": [],
+        "error": None,
+        "error_kind": None,
+        "base_url": config.OLLAMA_BASE_URL,
+    }
+
+
+_HEALTH_LOCK = threading.Lock()
+_HEALTH: Dict[str, Any] = {
+    "ollama": _empty_ollama_state(),
+    "embeddings": {"state": "not_loaded", "model": EMBED_MODEL, "message": None},
+    "warmup": {"state": "not_started", "message": None},
+    "last_answer_ms": None,
+    "checked_at": 0.0,
+    "probe_failures": 0,
+    "probed": False,
+}
+_HEALTH_THREAD: Optional[threading.Thread] = None
+
+# Séances currently generating. Set by the /seance route, read by /health.
+_BUSY_LOCK = threading.Lock()
+_BUSY = 0
+
+
+def _busy_state() -> Dict[str, Any]:
+    """Whether a generation is in flight right now."""
+    with _BUSY_LOCK:
+        busy = _BUSY > 0
+    return {"busy": busy, "busy_reason": "answering" if busy else None}
+
+
+def _seance_started() -> None:
+    global _BUSY
+    with _BUSY_LOCK:
+        _BUSY += 1
+
+
+def _seance_finished() -> None:
+    global _BUSY
+    with _BUSY_LOCK:
+        _BUSY = max(0, _BUSY - 1)
+
 
 def _last_answer_ms() -> Optional[int]:
     """Most recent séance latency from the database, if any."""
@@ -160,17 +222,110 @@ def _last_answer_ms() -> Optional[int]:
         return None
 
 
-@app.get("/health", tags=["health"])
-def health() -> JSONResponse:
-    """Real machine status. Nothing here is hardcoded."""
-    ollama = check_ollama(LLM_MODEL)
-    embed = get_embed_state()
-    llm_warm = get_warmup_state()
+def _snapshot_locked() -> Dict[str, Any]:
+    """Copy the cached snapshot. Caller holds _HEALTH_LOCK."""
+    return {
+        "ollama": dict(_HEALTH["ollama"]),
+        "embeddings": dict(_HEALTH["embeddings"]),
+        "warmup": dict(_HEALTH["warmup"]),
+        "last_answer_ms": _HEALTH["last_answer_ms"],
+        "checked_at": _HEALTH["checked_at"],
+        "probe_failures": _HEALTH["probe_failures"],
+        "probed": _HEALTH["probed"],
+    }
+
+
+def _health_snapshot() -> Dict[str, Any]:
+    with _HEALTH_LOCK:
+        return _snapshot_locked()
+
+
+def _note_answer_latency(latency_ms: int) -> None:
+    """Record a fresh latency in the snapshot (no SQLite on the request path)."""
+    with _HEALTH_LOCK:
+        _HEALTH["last_answer_ms"] = int(latency_ms)
+
+
+def refresh_health_once() -> Dict[str, Any]:
+    """Probe Ollama once and update the cached snapshot.
+
+    This is the only place that calls check_ollama() for status purposes. It
+    runs in the background refresher thread (and in tests), never inside the
+    /health request handler.
+    """
+    busy = _busy_state()["busy"]
+
+    # All slow work happens before the lock so /health is never made to wait.
+    probe = check_ollama(LLM_MODEL)
+    embeddings = get_embed_state()
+    warmup = get_warmup_state()
     last_ms = _last_answer_ms()
 
+    with _HEALTH_LOCK:
+        if busy and not probe["reachable"]:
+            # Generating on CPU can make /api/tags time out. That is not an
+            # outage: keep the last known good values and report "busy".
+            kept = dict(_HEALTH["ollama"])
+            kept["error_kind"] = probe["error_kind"]
+            probe = kept
+        else:
+            _HEALTH["probe_failures"] = (
+                0 if probe["reachable"] else _HEALTH["probe_failures"] + 1
+            )
+        _HEALTH["ollama"] = probe
+        _HEALTH["embeddings"] = embeddings
+        _HEALTH["warmup"] = warmup
+        _HEALTH["last_answer_ms"] = last_ms
+        _HEALTH["checked_at"] = time.time()
+        _HEALTH["probed"] = True
+        return _snapshot_locked()
+
+
+def _health_refresher() -> None:
+    """Background loop: keep the snapshot a few seconds fresh, forever."""
+    while True:
+        try:
+            refresh_health_once()
+        except Exception:  # noqa: BLE001 - the loop must survive anything
+            logger.exception("Health refresh failed")
+        time.sleep(HEALTH_REFRESH_S)
+
+
+def start_health_refresher() -> None:
+    """Start the snapshot refresher once (idempotent)."""
+    global _HEALTH_THREAD
+    if _HEALTH_THREAD is not None and _HEALTH_THREAD.is_alive():
+        return
+    # Seed the cheap, in-memory parts so the very first /health is already
+    # truthful about the embeddings, without waiting for a probe.
+    with _HEALTH_LOCK:
+        _HEALTH["embeddings"] = get_embed_state()
+        _HEALTH["warmup"] = get_warmup_state()
+    _HEALTH_THREAD = threading.Thread(
+        target=_health_refresher, name="health-refresh", daemon=True
+    )
+    _HEALTH_THREAD.start()
+
+
+@app.get("/health", tags=["health"])
+def health() -> JSONResponse:
+    """Cached machine status. Nothing here is hardcoded and nothing blocks."""
+    snapshot = _health_snapshot()
+    busy = _busy_state()
+
+    ollama = snapshot["ollama"]
+    embed = snapshot["embeddings"]
+    llm_warm = snapshot["warmup"]
+    last_ms = snapshot["last_answer_ms"]
     embeddings_ready = embed.get("state") == "ready"
 
-    if ollama["error_kind"] == "timeout" and llm_warm.get("state") == "warming":
+    if not snapshot["probed"]:
+        # No probe has completed yet: do not pretend Ollama is down.
+        status = "checking"
+    elif busy["busy"] and ollama["reachable"]:
+        # Working is not failing.
+        status = "busy"
+    elif ollama["error_kind"] == "timeout" and llm_warm.get("state") == "warming":
         # Ollama is busy loading the model: it is up, just slow.
         status = "warming"
     elif not ollama["reachable"] or embed.get("state") == "error":
@@ -180,10 +335,17 @@ def health() -> JSONResponse:
     else:
         status = "warming"
 
+    checked_at = snapshot["checked_at"]
+    age_ms = int((time.time() - checked_at) * 1000) if checked_at else None
+
     return JSONResponse({
         "status": status,
         "version": APP_VERSION,
-        "ollama": {
+        "busy": busy["busy"],
+        "busy_reason": busy["busy_reason"],
+        "checked_at": checked_at or None,
+        "age_ms": age_ms,
+        "probe_failures": snapshot["probe_failures"],        "ollama": {
             "reachable": ollama["reachable"],
             "model": ollama["model"],
             "model_installed": ollama["model_installed"],
@@ -205,6 +367,7 @@ def health() -> JSONResponse:
         "embeddings_loaded": embeddings_ready,
         "last_answer_latency_ms": last_ms,
     })
+
 
 
 # --- Repos -----------------------------------------------------------------
@@ -587,8 +750,7 @@ def _seance(repo_id: int, as_of: str, question: str) -> Dict[str, Any]:
 
     # Retrieval is date-prefix filtered: nothing after as_of is scored.
     hits = retrieve(repo_id, question, config.as_of_end(as_of), k=RETRIEVAL_K)
-    evidence_hashes = {hit["hash"] for hit in hits}
-    texts = get_commits_by_hashes(repo_id, list(evidence_hashes))
+    texts = get_commits_by_hashes(repo_id, [hit["hash"] for hit in hits])
 
     evidence: List[dict] = []
     for hit in hits:
@@ -601,8 +763,15 @@ def _seance(repo_id: int, as_of: str, question: str) -> Dict[str, Any]:
             "similarity": hit.get("similarity"),
         })
 
+    # Keep only the evidence that fits the character budget. Fewer prompt
+    # tokens is the difference between a 25 s and a 90 s CPU answer, and the
+    # verifier below only accepts hashes the model was actually shown.
+    evidence = fit_evidence(evidence)
+    evidence_hashes = {ev["hash"] for ev in evidence}
+
     if not evidence:
         latency_ms = int((time.time() - started) * 1000)
+        _note_answer_latency(latency_ms)
         return {
             "answer": REFUSAL,
             "remembers": "",
@@ -615,6 +784,16 @@ def _seance(repo_id: int, as_of: str, question: str) -> Dict[str, Any]:
         }
 
     messages = build_prompt(as_of, question, evidence)
+    evidence_chars = sum(
+        len(ev.get("subject") or "") + len(ev.get("body") or "") for ev in evidence
+    )
+    prompt_chars = sum(len(m.get("content") or "") for m in messages)
+    logger.info(
+        "seance: %d evidence commits, %d chars of evidence, %d chars of prompt, "
+        "num_predict=%d num_ctx=%d",
+        len(evidence), evidence_chars, prompt_chars,
+        config.LLM_NUM_PREDICT, config.LLM_NUM_CTX,
+    )
 
     try:
         result = chat(model=LLM_MODEL, messages=messages, schema=SEANCE_SCHEMA)
@@ -624,6 +803,13 @@ def _seance(repo_id: int, as_of: str, question: str) -> Dict[str, Any]:
             status_code=503,
             detail={"code": exc.code, "message": str(exc)},
         ) from exc
+
+    usage = result.get("usage") or {}
+    logger.info(
+        "seance: tokens prompt=%s completion=%s total=%.1fs",
+        usage.get("prompt_tokens"), usage.get("completion_tokens"),
+        (time.time() - started),
+    )
 
     parsed = result["parsed"]
     raw_claims = parsed.get("claims") or []
@@ -652,6 +838,7 @@ def _seance(repo_id: int, as_of: str, question: str) -> Dict[str, Any]:
         answer = "; ".join(c["claim"] for c in claims)
 
     latency_ms = int((time.time() - started) * 1000)
+    _note_answer_latency(latency_ms)
 
     try:
         log_seance(
@@ -684,6 +871,7 @@ def _seance(repo_id: int, as_of: str, question: str) -> Dict[str, Any]:
         "latency_ms": latency_ms,
         "verified": len(claims),
         "claims_total": len(raw_claims),
+        "usage": usage,
     }
 
 
@@ -712,7 +900,13 @@ async def seance(request: Request) -> Dict[str, Any]:
     # and the rest of the API stay responsive during a slow generation.
     from starlette.concurrency import run_in_threadpool
 
-    return await run_in_threadpool(_seance, repo_id, as_of, question or "")
+    # Mark the machine busy for /health before any blocking work starts, and
+    # clear it even if the model errors, times out or the client disconnects.
+    _seance_started()
+    try:
+        return await run_in_threadpool(_seance, repo_id, as_of, question or "")
+    finally:
+        _seance_finished()
 
 
 # --- Error handling --------------------------------------------------------

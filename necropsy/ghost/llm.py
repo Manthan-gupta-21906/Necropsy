@@ -25,6 +25,8 @@ from ..config import (
     LLM_RETRY,
     LLM_THINKING_DISABLED,
     LLM_KEEP_ALIVE,
+    LLM_NUM_PREDICT,
+    LLM_NUM_CTX,
     OLLAMA_BASE_URL,
 )
 
@@ -205,7 +207,13 @@ def warmup_async(model_name: Optional[str] = None) -> None:
                     "stream": False,
                     "think": False,
                     "keep_alive": LLM_KEEP_ALIVE,
-                    "options": {"temperature": 0.0, "num_predict": 4},
+                    # Must match chat() exactly: Ollama reloads the model when
+                    # num_ctx changes, and a reload costs ~70 s on this CPU.
+                    "options": {
+                        "temperature": 0.0,
+                        "num_predict": 4,
+                        "num_ctx": LLM_NUM_CTX,
+                    },
                 },
                 timeout=LLM_TIMEOUT,
             )
@@ -249,7 +257,13 @@ def chat(
         # qwen3 supports disabling its thinking trace; required for JSON.
         "think": not LLM_THINKING_DISABLED,
         "keep_alive": LLM_KEEP_ALIVE,
-        "options": {"temperature": 0.0},
+        "options": {
+            "temperature": 0.0,
+            # Bound the answer: the séance reply is a small JSON object.
+            "num_predict": LLM_NUM_PREDICT,
+            # Keep the KV cache small so CPU prefill stays quick.
+            "num_ctx": LLM_NUM_CTX,
+        },
     }
     if schema:
         # Ollama accepts a JSON schema here and constrains generation to it.
@@ -302,6 +316,23 @@ def chat(
             continue
 
         content = (body.get("message") or {}).get("content", "")
+        usage = {
+            "prompt_tokens": body.get("prompt_eval_count"),
+            "completion_tokens": body.get("eval_count"),
+            "total_tokens": (
+                (body.get("prompt_eval_count") or 0) + (body.get("eval_count") or 0)
+            ),
+            "total_duration_ms": (
+                int(body["total_duration"] / 1_000_000)
+                if body.get("total_duration") else None
+            ),
+        }
+        logger.info(
+            "Ollama %s: prompt_tokens=%s completion_tokens=%s total=%.1fs "
+            "num_predict=%s num_ctx=%s",
+            model, usage["prompt_tokens"], usage["completion_tokens"],
+            latency_ms / 1000.0, LLM_NUM_PREDICT, LLM_NUM_CTX,
+        )
         parsed = _extract_json_from_text(content)
         if isinstance(parsed, dict):
             return {
@@ -310,6 +341,7 @@ def chat(
                 "parsed": parsed,
                 "latency_ms": latency_ms,
                 "model": model,
+                "usage": usage,
             }
 
         last_error = JSONVerifyError(

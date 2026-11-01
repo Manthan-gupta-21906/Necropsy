@@ -17,8 +17,16 @@ LLM_FALLBACK = os.environ.get("NECROPSY_LLM_FALLBACK", "qwen3:4b")
 OLLAMA_BASE_URL = os.environ.get("NECROPSY_OLLAMA_URL", "http://127.0.0.1:11434")
 
 # Retrieval settings
-RETRIEVAL_K = 10       # number of top commits to retrieve before re-ranking
-RETRIEVAL_TOP_N = 5    # number of top commits to use in the prompt
+# Fewer, tighter evidence blocks mean far fewer prompt tokens on a CPU-only
+# laptop, which is the dominant cost of a séance (see docs/DECISIONS.md D-013).
+RETRIEVAL_K = int(os.environ.get("NECROPSY_RETRIEVAL_K", "6"))
+RETRIEVAL_TOP_N = int(os.environ.get("NECROPSY_RETRIEVAL_TOP_N", "4"))
+
+# Evidence budget handed to the model. The prompt is truncated to this many
+# characters of evidence text; nothing over budget is shown (and therefore
+# nothing over budget can be cited).
+EVIDENCE_CHAR_BUDGET = int(os.environ.get("NECROPSY_EVIDENCE_CHARS", "1400"))
+EVIDENCE_ITEM_CHARS = int(os.environ.get("NECROPSY_EVIDENCE_ITEM_CHARS", "200"))
 
 # Date semantics: as_of is the end of that day in UTC
 # Items use authored_at for filtering; committed_at stored for reference only
@@ -68,6 +76,13 @@ LLM_RETRY = True       # retry once on transient Ollama errors
 LLM_THINKING_DISABLED = True  # force thinking=disabled in Ollama chat
 # Keep the model resident between requests (5 minutes by default).
 LLM_KEEP_ALIVE = os.environ.get("NECROPSY_LLM_KEEP_ALIVE", "30m")
+# Generation limits. A complete séance answer measured 253 tokens on qwen3:8b,
+# so 448 leaves headroom without letting a runaway generation run forever.
+LLM_NUM_PREDICT = int(os.environ.get("NECROPSY_LLM_NUM_PREDICT", "448"))
+# Context window: the prompt is a system line plus a small evidence block, so
+# 2048 tokens is ample. A smaller num_ctx means a smaller KV cache and a
+# noticeably faster prefill on CPU.
+LLM_NUM_CTX = int(os.environ.get("NECROPSY_LLM_NUM_CTX", "2048"))
 
 # All model names live only here. Swap via:
 #   $env:NECROPSY_EMBED_MODEL="..."; $env:NECROPSY_LLM_MODEL="..."

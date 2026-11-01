@@ -21,19 +21,21 @@ def client():
     return TestClient(app)
 
 
-def fake_ollama(reachable=True, installed=True, model="qwen3:8b"):
+def fake_ollama(reachable=True, installed=True, model="qwen3:8b", error_kind=None):
     return {
         "reachable": reachable,
         "model": model,
         "model_installed": installed,
         "models": [model] if installed else [],
         "error": None if reachable else "connection refused",
-        "error_kind": None if reachable else "connection",
+        "error_kind": None if reachable else (error_kind or "connection"),
         "base_url": "http://127.0.0.1:11434",
     }
 
 
 # --- /health ---------------------------------------------------------------
+# /health returns a cached snapshot: it never probes Ollama itself. Tests
+# therefore refresh the snapshot explicitly after patching the probe.
 
 def test_health_reports_real_state(client, monkeypatch):
     monkeypatch.setattr(server_module, "check_ollama", lambda *a, **k: fake_ollama())
@@ -42,6 +44,7 @@ def test_health_reports_real_state(client, monkeypatch):
         lambda: {"state": "ready", "model": "BAAI/bge-small-en-v1.5", "message": None},
     )
     monkeypatch.setattr(server_module, "get_warmup_state", lambda: {"state": "warm"})
+    server_module.refresh_health_once()
 
     body = client.get("/health").json()
     assert body["status"] == "ok"
@@ -49,6 +52,9 @@ def test_health_reports_real_state(client, monkeypatch):
     assert body["ollama"]["model_installed"] is True
     assert body["ollama"]["model"] == "qwen3:8b"
     assert body["embeddings"]["state"] == "ready"
+    assert body["busy"] is False
+    assert body["busy_reason"] is None
+    assert body["age_ms"] is not None
 
 
 def test_health_is_error_when_ollama_is_down(client, monkeypatch):
@@ -59,6 +65,7 @@ def test_health_is_error_when_ollama_is_down(client, monkeypatch):
         lambda: {"state": "ready", "model": "m", "message": None},
     )
     monkeypatch.setattr(server_module, "get_warmup_state", lambda: {"state": "error"})
+    server_module.refresh_health_once()
 
     body = client.get("/health").json()
     assert body["status"] == "error"
@@ -72,9 +79,21 @@ def test_health_is_warming_while_embeddings_load(client, monkeypatch):
         lambda: {"state": "loading", "model": "m", "message": None},
     )
     monkeypatch.setattr(server_module, "get_warmup_state", lambda: {"state": "warming"})
+    server_module.refresh_health_once()
 
     body = client.get("/health").json()
     assert body["status"] == "warming"
+
+
+def test_health_never_probes_ollama(client, monkeypatch):
+    """The endpoint must only read the cached snapshot, never call Ollama."""
+    def boom(*args, **kwargs):  # noqa: ARG001
+        raise AssertionError("/health must not probe Ollama")
+
+    monkeypatch.setattr(server_module, "check_ollama", boom)
+    response = client.get("/health")
+    assert response.status_code == 200
+
 
 
 # --- /repos ----------------------------------------------------------------
