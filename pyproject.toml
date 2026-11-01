@@ -23,3 +23,7 @@ where = ["necropsy"]
 
 [tool.setuptools.install.args]
 pip_args = "--no-deps"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["data", ".venv", "node_modules"]
