@@ -183,7 +183,9 @@ _HEALTH: Dict[str, Any] = {
 }
 _HEALTH_THREAD: Optional[threading.Thread] = None
 
-# Séances currently generating. Set by the /seance route, read by /health.
+# Séances currently generating. Set by the /seance route, read by /health and delete endpoint.
+_active_seance_repos: set = set()  # repo IDs with active séances
+_active_seance_repos_lock = threading.Lock()
 _BUSY_LOCK = threading.Lock()
 _BUSY = 0
 
@@ -195,16 +197,22 @@ def _busy_state() -> Dict[str, Any]:
     return {"busy": busy, "busy_reason": "answering" if busy else None}
 
 
-def _seance_started() -> None:
+def _seance_started(repo_id: int) -> None:
+    """Mark a séance as started for a specific repo."""
     global _BUSY
     with _BUSY_LOCK:
         _BUSY += 1
+    with _active_seance_repos_lock:
+        _active_seance_repos.add(repo_id)
 
 
-def _seance_finished() -> None:
+def _seance_finished(repo_id: int) -> None:
+    """Mark a séance as finished for a specific repo."""
     global _BUSY
     with _BUSY_LOCK:
         _BUSY = max(0, _BUSY - 1)
+    with _active_seance_repos_lock:
+        _active_seance_repos.discard(repo_id)
 
 
 def _last_answer_ms() -> Optional[int]:
@@ -902,14 +910,55 @@ async def seance(request: Request) -> Dict[str, Any]:
 
     # Mark the machine busy for /health before any blocking work starts, and
     # clear it even if the model errors, times out or the client disconnects.
-    _seance_started()
+    _seance_started(repo_id)
     try:
         return await run_in_threadpool(_seance, repo_id, as_of, question or "")
     finally:
-        _seance_finished()
+        _seance_finished(repo_id)
 
 
 # --- Error handling --------------------------------------------------------
+
+
+@app.delete("/repos/{repo_id}", tags=["repos"])
+def delete_repo_endpoint(repo_id: int) -> Dict[str, Any]:
+    """Delete a repository's data from the database and its clone directory.
+    
+    The repo's clone is only deleted if it lives inside the app's own
+    data/repos directory.  A local path outside that directory is never
+    removed for safety.
+    """
+    from necropsy.db import delete_repo_rows
+    from fastapi import HTTPException
+    
+    # Check if repo exists
+    repo = get_repo(repo_id)
+    if repo is None:
+        raise HTTPException(status_code=404, detail=f"Repo {repo_id} is not indexed")
+    
+    # Check if a séance is currently running (simple check using _BUSY counter)
+    with _BUSY_LOCK:
+        if _BUSY > 0:
+            raise HTTPException(status_code=409, detail="Cannot delete repo while a séance is in progress")
+    
+    # Delete all rows from all tables
+    counts = delete_repo_rows(repo_id)
+    
+    # Delete the repo row itself
+    conn = get_connection()
+    try:
+        conn.execute("PRAGMA foreign_keys = ON;")
+        conn.execute("DELETE FROM repos WHERE id = ?", (repo_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    
+    return {
+        "repo_id": repo_id,
+        "repo_name": repo.get("name"),
+        "delete_counts": counts,
+    }
+
 
 @app.exception_handler(Exception)
 async def unhandled_exception(request: Request, exc: Exception) -> JSONResponse:

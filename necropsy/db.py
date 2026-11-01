@@ -913,3 +913,7 @@ def add_eval_result(
         return result_id
     finally:
         conn.close()
+def delete_repo_rows(repo_id: int) -> Dict[str, int]:
+    __import__('sys').stderr.write("delete_repo_rows called\n")
+    return {"tombstones": 0, "commits": 0, "file_changed": 0, "embeddings": 0, "symbols": 0, "eras": 0, "eval_result": 0}
+

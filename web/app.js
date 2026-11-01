@@ -222,6 +222,8 @@
     function selectRepo(repo) {
         state.repo = repo;
         setText(el('repo-name'), repo.name || ('repo ' + repo.id));
+        
+        // Forget button\n        var forgetBtn = document.createElement('button');\n        forgetBtn.type = 'button';\n        forgetBtn.className = 'chip';\n        forgetBtn.title = 'Forget this repository';\n        forgetBtn.innerHTML = 'Forget';\n        forgetBtn.onclick = function() {\n            if (confirm('Are you sure you want to forget this repository? This will delete all its data and its clone from data/repos.')) {\n                api('/repos/' + repo.id, {}, TIMEOUTS.health)\n                    .then(function() {\n                        loadRepos().then(function() {\n                            selectRepo(null);\n                        });\n                    })\n                    .catch(function(er) {\n                        alert('Failed to forget repository: ' + er);\n                    })\n            }\n        };\n        var repoBox = el('repo-select');\n        repoBox.parentNode.insertBefore(forgetBtn, repoBox.nextSibling);
         setHidden(el('timeline-section'), false);
         setHidden(el('autopsy-section'), false);
 
